@@ -872,62 +872,77 @@ search:
 	h.flags &^= hashWriting
 }
 
-// mapiterinit initializes the hiter struct used for ranging over maps.
-// The hiter struct pointed to by 'it' is allocated on the stack
-// by the compilers order pass or on the heap by reflect_mapiterinit.
-// Both need to have zeroed hiter since the struct contains pointers.
+// 初始化用于遍历映射的 hiter 结构。
+// hiter 结构由编译器的 order pass 在栈上分配，
+// 或者通过 reflect_mapiterinit 在堆上分配，
+// 两者都需要一个已清零的 hiter 结构，因为它包含指针。
 func mapiterinit(t *maptype, h *hmap, it *hiter) {
+	// 如果启用了竞态检测并且 h 不为 nil，
+	// 记录对 h 的读取范围和调用者 PC。
 	if raceenabled && h != nil {
 		callerpc := getcallerpc()
 		racereadpc(unsafe.Pointer(h), callerpc, abi.FuncPCABIInternal(mapiterinit))
 	}
 
+	// 设置迭代器的映射类型
 	it.t = t
+	// 如果 h 为 nil 或者映射没有元素，直接返回。
 	if h == nil || h.count == 0 {
 		return
 	}
 
+	// 检查 hiter 结构的大小是否正确，
+	// 这个检查在编译阶段的反射数据生成中很重要。
 	if unsafe.Sizeof(hiter{})/goarch.PtrSize != 12 {
 		throw("hash_iter size incorrect") // see cmd/compile/internal/reflectdata/reflect.go
 	}
+
+	// 设置迭代器指向的 hmap
 	it.h = h
 
-	// grab snapshot of bucket state
-	it.B = h.B
-	it.buckets = h.buckets
+	// 获取 bucket 的状态快照
+	it.B = h.B             // 记录映射的基数（B值）
+	it.buckets = h.buckets // 记录桶数组
 	if t.Bucket.PtrBytes == 0 {
-		// Allocate the current slice and remember pointers to both current and old.
-		// This preserves all relevant overflow buckets alive even if
-		// the table grows and/or overflow buckets are added to the table
-		// while we are iterating.
+		// 如果桶内元素不是指针类型，
+		// 创建溢出桶的切片并记住指向当前和旧的溢出桶的指针。
+		// 这样可以保证即使在迭代期间映射增长或者添加了新的溢出桶，
+		// 所有相关溢出桶仍然存活。
 		h.createOverflow()
 		it.overflow = h.extra.overflow
 		it.oldoverflow = h.extra.oldoverflow
 	}
 
-	// decide where to start
+	// 决定开始位置
+	// 使用 fastrand 或 fastrand64 生成随机数，
+	// 具体取决于映射的基数 B 是否大于 31 - bucketCntBits。
 	var r uintptr
 	if h.B > 31-bucketCntBits {
 		r = uintptr(fastrand64())
 	} else {
 		r = uintptr(fastrand())
 	}
+	// 计算开始的 bucket 索引
 	it.startBucket = r & bucketMask(h.B)
+	// 计算 bucket 内的偏移量
 	it.offset = uint8(r >> h.B & (bucketCnt - 1))
-
-	// iterator state
+	// 设置迭代器的初始 bucket 状态
 	it.bucket = it.startBucket
 
-	// Remember we have an iterator.
-	// Can run concurrently with another mapiterinit().
+	// 标记此映射已经有迭代器在运行
+	// 可以与另一个 mapiterinit() 函数并发执行。
 	if old := h.flags; old&(iterator|oldIterator) != iterator|oldIterator {
 		atomic.Or8(&h.flags, iterator|oldIterator)
 	}
 
+	// 调用 mapiternext 来定位下一个可访问的键值对。
 	mapiternext(it)
 }
 
+// 更新 hiter 结构，使其指向映射中的下一个元素。
+// 这个函数用于遍历映射，找到下一个有效的键值对。
 func mapiternext(it *hiter) {
+	// 当前映射的 hmap 结构
 	h := it.h
 	if raceenabled {
 		callerpc := getcallerpc()
@@ -936,79 +951,81 @@ func mapiternext(it *hiter) {
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map iteration and map write")
 	}
-	t := it.t
-	bucket := it.bucket
-	b := it.bptr
-	i := it.i
-	checkBucket := it.checkBucket
+
+	t := it.t                     // 映射的类型
+	bucket := it.bucket           // 当前桶的索引
+	b := it.bptr                  // 当前桶的指针
+	i := it.i                     // 当前桶中的元素索引
+	checkBucket := it.checkBucket // 需要检查的桶
 
 next:
 	if b == nil {
+		// 如果当前桶为空
 		if bucket == it.startBucket && it.wrapped {
-			// end of iteration
+			// 当前桶回到起始桶并且已经遍历了一轮，迭代结束
 			it.key = nil
 			it.elem = nil
 			return
 		}
 		if h.growing() && it.B == h.B {
-			// Iterator was started in the middle of a grow, and the grow isn't done yet.
-			// If the bucket we're looking at hasn't been filled in yet (i.e. the old
-			// bucket hasn't been evacuated) then we need to iterate through the old
-			// bucket and only return the ones that will be migrated to this bucket.
+			// 如果哈希表正在扩容并且迭代器的 bucket值 等于哈希表的 bucket数
+			// 表示迭代器在映射扩容中启动，映射尚未完成扩容
+			// 需要处理旧桶和新桶之间元素的迁移
+
+			// 确定要处理的旧桶
 			oldbucket := bucket & it.h.oldbucketmask()
 			b = (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.BucketSize)))
+			// 是否已经被搬迁过
 			if !evacuated(b) {
+				// 如果当前桶还没有被迁移，需要遍历旧桶并且仅返回那些将要迁移到当前桶的元素
 				checkBucket = bucket
 			} else {
+				// 如果当前桶已经迁移完成，则直接指向当前桶
 				b = (*bmap)(add(it.buckets, bucket*uintptr(t.BucketSize)))
 				checkBucket = noCheck
 			}
 		} else {
+			// 非扩容状态下直接处理当前桶
 			b = (*bmap)(add(it.buckets, bucket*uintptr(t.BucketSize)))
 			checkBucket = noCheck
 		}
+
+		// 处理完当前桶后，准备处理下一个桶
 		bucket++
 		if bucket == bucketShift(it.B) {
+			// 如果已经处理完整个哈希表，回到第一个桶，同时标记为已经遍历过一轮
 			bucket = 0
 			it.wrapped = true
 		}
+		// 重置桶中元素的索引
 		i = 0
 	}
 	for ; i < bucketCnt; i++ {
+		// 计算当前桶中元素的索引
 		offi := (i + it.offset) & (bucketCnt - 1)
+		// 如果当前位置是空的或者被迁移为空标记，继续遍历下一个位置
 		if isEmpty(b.tophash[offi]) || b.tophash[offi] == evacuatedEmpty {
-			// TODO: emptyRest is hard to use here, as we start iterating
-			// in the middle of a bucket. It's feasible, just tricky.
 			continue
 		}
+
+		// 计算键和值的指针位置
 		k := add(unsafe.Pointer(b), dataOffset+uintptr(offi)*uintptr(t.KeySize))
 		if t.IndirectKey() {
 			k = *((*unsafe.Pointer)(k))
 		}
 		e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+uintptr(offi)*uintptr(t.ValueSize))
+
+		// 特殊情况：迭代开始于映射扩容至更大尺寸的过程中，且扩容尚未完成。
 		if checkBucket != noCheck && !h.sameSizeGrow() {
-			// Special case: iterator was started during a grow to a larger size
-			// and the grow is not done yet. We're working on a bucket whose
-			// oldbucket has not been evacuated yet. Or at least, it wasn't
-			// evacuated when we started the bucket. So we're iterating
-			// through the oldbucket, skipping any keys that will go
-			// to the other new bucket (each oldbucket expands to two
-			// buckets during a grow).
+			// 我们正在处理一个其旧桶尚未清空的桶。需要检查元素是否属于当前新桶。
 			if t.ReflexiveKey() || t.Key.Equal(k, k) {
-				// If the item in the oldbucket is not destined for
-				// the current new bucket in the iteration, skip it.
+				// 如果 oldbucket 中的项目不是指定给迭代中的当前新存储桶，则跳过它。
 				hash := t.Hasher(k, uintptr(h.hash0))
 				if hash&bucketMask(it.B) != checkBucket {
 					continue
 				}
 			} else {
-				// Hash isn't repeatable if k != k (NaNs).  We need a
-				// repeatable and randomish choice of which direction
-				// to send NaNs during evacuation. We'll use the low
-				// bit of tophash to decide which way NaNs go.
-				// NOTE: this case is why we need two evacuate tophash
-				// values, evacuatedX and evacuatedY, that differ in
-				// their low bit.
+				// 处理 key 不等于自身的情况
 				if checkBucket>>(it.B-1) != uintptr(b.tophash[offi]&1) {
 					continue
 				}
@@ -1016,39 +1033,32 @@ next:
 		}
 		if (b.tophash[offi] != evacuatedX && b.tophash[offi] != evacuatedY) ||
 			!(t.ReflexiveKey() || t.Key.Equal(k, k)) {
-			// This is the golden data, we can return it.
-			// OR
-			// key!=key, so the entry can't be deleted or updated, so we can just return it.
-			// That's lucky for us because when key!=key we can't look it up successfully.
+			// 找到有效的键值对，设置迭代器的键和值
 			it.key = k
 			if t.IndirectElem() {
 				e = *((*unsafe.Pointer)(e))
 			}
 			it.elem = e
 		} else {
-			// The hash table has grown since the iterator was started.
-			// The golden data for this key is now somewhere else.
-			// Check the current hash table for the data.
-			// This code handles the case where the key
-			// has been deleted, updated, or deleted and reinserted.
-			// NOTE: we need to regrab the key as it has potentially been
-			// updated to an equal() but not identical key (e.g. +0.0 vs -0.0).
+			// 映射已经扩容，当前键的有效数据现在位于其他地方，重新查找键值对
 			rk, re := mapaccessK(t, h, k)
 			if rk == nil {
-				continue // key has been deleted
+				continue // 键已被删除
 			}
 			it.key = rk
 			it.elem = re
 		}
+
+		// 设置迭代器的桶、当前处理的桶指针、元素索引等信息
 		it.bucket = bucket
-		if it.bptr != b { // avoid unnecessary write barrier; see issue 14921
+		if it.bptr != b { // 避免不必要的写入障碍; 请参阅问题14921
 			it.bptr = b
 		}
 		it.i = i + 1
 		it.checkBucket = checkBucket
 		return
 	}
-	b = b.overflow(t)
+	b = b.overflow(t) // 如果桶中有溢出链表，移动到溢出链表继续查找。
 	i = 0
 	goto next
 }
