@@ -80,8 +80,7 @@ type int int
 // distinct type, however, and not an alias for, say, uint32.
 type uint uint
 
-// uintptr is an integer type that is large enough to hold the bit pattern of
-// any pointer.
+// uintptr是一个整数类型，其大小足以容纳任何指针。
 type uintptr uintptr
 
 // byte is an alias for uint8 and is equivalent to uint8 in all ways. It is

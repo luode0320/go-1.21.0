@@ -14,6 +14,7 @@ src/make.bat
 # linux
 src/make.bash
 ```
+![img_2.png](img_2.png)
 
 ### 配置ide
 ![img.png](img.png)

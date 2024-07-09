@@ -13,9 +13,9 @@ import (
 )
 
 type slice struct {
-	array unsafe.Pointer
-	len   int
-	cap   int
+	array unsafe.Pointer // 数组指针
+	len   int            // 长度
+	cap   int            // 容量
 }
 
 // A notInHeapSlice is a slice backed by runtime/internal/sys.NotInHeap memory.
@@ -85,14 +85,15 @@ func makeslicecopy(et *_type, tolen int, fromlen int, from unsafe.Pointer) unsaf
 	return to
 }
 
+// 创建切片
 func makeslice(et *_type, len, cap int) unsafe.Pointer {
+	// 计算分配内存的总大小，并检查溢出以及内存是否超出最大值
 	mem, overflow := math.MulUintptr(et.Size_, uintptr(cap))
 	if overflow || mem > maxAlloc || len < 0 || len > cap {
-		// NOTE: Produce a 'len out of range' error instead of a
-		// 'cap out of range' error when someone does make([]T, bignumber).
-		// 'cap out of range' is true too, but since the cap is only being
-		// supplied implicitly, saying len is clearer.
-		// See golang.org/issue/4085.
+		// 注意：当有人执行 make([]T, 大数) 时，生成 'len 超出范围' 错误而不是 'cap 超出范围' 错误。
+		// 'cap 超出范围' 也是正确的，但由于 cap 只是隐式提供的，说明 len 更清晰。
+		// 参见 golang.org/issue/4085。
+		// 如果长度超出范围，抛出异常
 		mem, overflow := math.MulUintptr(et.Size_, uintptr(len))
 		if overflow || mem > maxAlloc || len < 0 {
 			panicmakeslicelen()
@@ -100,6 +101,7 @@ func makeslice(et *_type, len, cap int) unsafe.Pointer {
 		panicmakeslicecap()
 	}
 
+	// 分配内存空间并返回指向该内存空间的指针
 	return mallocgc(mem, et, true)
 }
 
@@ -123,39 +125,14 @@ func mulUintptr(a, b uintptr) (uintptr, bool) {
 	return math.MulUintptr(a, b)
 }
 
-// growslice allocates new backing store for a slice.
-//
-// arguments:
-//
-//	oldPtr = pointer to the slice's backing array
-//	newLen = new length (= oldLen + num)
-//	oldCap = original slice's capacity.
-//	   num = number of elements being added
-//	    et = element type
-//
-// return values:
-//
-//	newPtr = pointer to the new backing store
-//	newLen = same value as the argument
-//	newCap = capacity of the new backing store
-//
-// Requires that uint(newLen) > uint(oldCap).
-// Assumes the original slice length is newLen - num
-//
-// A new backing store is allocated with space for at least newLen elements.
-// Existing entries [0, oldLen) are copied over to the new backing store.
-// Added entries [oldLen, newLen) are not initialized by growslice
-// (although for pointer-containing element types, they are zeroed). They
-// must be initialized by the caller.
-// Trailing entries [newLen, newCap) are zeroed.
-//
-// growslice's odd calling convention makes the generated code that calls
-// this function simpler. In particular, it accepts and returns the
-// new length so that the old length is not live (does not need to be
-// spilled/restored) and the new length is returned (also does not need
-// to be spilled/restored).
+// 函数用于在 slice 需要扩容时分配新的底层数组。
+// 它接受旧的数组指针、新的长度、旧的容量、要添加的元素数量和元素类型，
+// 并返回新的数组指针、新的长度和新的容量。
 func growslice(oldPtr unsafe.Pointer, newLen, oldCap, num int, et *_type) slice {
+	// 计算原有的长度
 	oldLen := newLen - num
+
+	// 如果启用了竞态检测、内存安全检测或地址安全检测，记录读取范围
 	if raceenabled {
 		callerpc := getcallerpc()
 		racereadrangepc(oldPtr, uintptr(oldLen*int(et.Size_)), callerpc, abi.FuncPCABIInternal(growslice))
@@ -167,119 +144,124 @@ func growslice(oldPtr unsafe.Pointer, newLen, oldCap, num int, et *_type) slice 
 		asanread(oldPtr, uintptr(oldLen*int(et.Size_)))
 	}
 
+	// 检查新的长度是否合理
 	if newLen < 0 {
-		panic(errorString("growslice: len out of range"))
+		panic(errorString("切片扩容: len 超出范围"))
 	}
 
+	// 如果元素大小为 0，特殊处理
 	if et.Size_ == 0 {
-		// append should not create a slice with nil pointer but non-zero len.
-		// We assume that append doesn't need to preserve oldPtr in this case.
+		// append 不应创建具有nil指针但非零len的切片。
+		// 我们假设append在这种情况下不需要保留oldPtr。
 		return slice{unsafe.Pointer(&zerobase), newLen, newLen}
 	}
 
+	// 计算新的容量
 	newcap := oldCap
 	doublecap := newcap + newcap
 	if newLen > doublecap {
 		newcap = newLen
 	} else {
+		// 容量如果小于256, 直接翻倍扩容
 		const threshold = 256
 		if oldCap < threshold {
 			newcap = doublecap
 		} else {
-			// Check 0 < newcap to detect overflow
-			// and prevent an infinite loop.
+			// 对于大容量的 slice，采用 1.25 倍的增长策略
 			for 0 < newcap && newcap < newLen {
-				// Transition from growing 2x for small slices
-				// to growing 1.25x for large slices. This formula
-				// gives a smooth-ish transition between the two.
+				// 从小切片的2倍增长到大切片的1.25倍。
+				// 这个公式给出了两者之间的平滑过渡。
 				newcap += (newcap + 3*threshold) / 4
 			}
-			// Set newcap to the requested cap when
-			// the newcap calculation overflowed.
+			// 将newcap设置为请求的cap，当newcap计算溢出。
 			if newcap <= 0 {
 				newcap = newLen
 			}
 		}
 	}
 
+	// 检查容量计算是否溢出
 	var overflow bool
+	// 各个属性的内存大小
 	var lenmem, newlenmem, capmem uintptr
-	// Specialize for common values of et.Size.
-	// For 1 we don't need any division/multiplication.
-	// For goarch.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
-	// For powers of 2, use a variable shift.
+
+	// 计算旧长度、新长度和容量各自所需的内存大小，并检查是否溢出
+	// 最终确定哈希表的内存大小以及新的容量，并在需要时进行向上取整的优化计算。
 	switch {
 	case et.Size_ == 1:
-		lenmem = uintptr(oldLen)
-		newlenmem = uintptr(newLen)
-		capmem = roundupsize(uintptr(newcap))
-		overflow = uintptr(newcap) > maxAlloc
-		newcap = int(capmem)
+		lenmem = uintptr(oldLen)    // 计算旧长度的内存大小（每个元素大小为1）
+		newlenmem = uintptr(newLen) // 计算新长度的内存大小（每个元素大小为1）
+		// 对容量进行向上取整的优化计算
+		capmem = roundupsize(uintptr(newcap)) // 计算新容量的内存大小并向上取整
+		overflow = uintptr(newcap) > maxAlloc // 检查新容量是否超出最大分配内存限制
+		newcap = int(capmem)                  // 更新新容量为向上取整后的值
+
+	// 如果系统是 64 位，那么 PtrSize 的值将是 8；如果是 32 位，那么 PtrSize 的值将是 4
 	case et.Size_ == goarch.PtrSize:
-		lenmem = uintptr(oldLen) * goarch.PtrSize
-		newlenmem = uintptr(newLen) * goarch.PtrSize
-		capmem = roundupsize(uintptr(newcap) * goarch.PtrSize)
-		overflow = uintptr(newcap) > maxAlloc/goarch.PtrSize
-		newcap = int(capmem / goarch.PtrSize)
+		lenmem = uintptr(oldLen) * goarch.PtrSize    // 计算旧长度的内存大小（每个元素大小为指针大小）
+		newlenmem = uintptr(newLen) * goarch.PtrSize // 计算新长度的内存大小（每个元素大小为指针大小）
+		// 对容量进行向上取整的优化计算
+		capmem = roundupsize(uintptr(newcap) * goarch.PtrSize) // 计算新容量的内存大小并向上取整
+		overflow = uintptr(newcap) > maxAlloc/goarch.PtrSize   // 检查新容量是否超出最大分配内存限制
+		newcap = int(capmem / goarch.PtrSize)                  // 更新新容量为向上取整后的值
+
+	// 如果元素大小是2的幂次方
 	case isPowerOfTwo(et.Size_):
+		// 定义位移量变量
 		var shift uintptr
+		// 如果指针大小为8字节
 		if goarch.PtrSize == 8 {
-			// Mask shift for better code generation.
+			// 用于更好的代码生成，对位移进行掩码操作
+			// 计算位移量并进行掩码操作保留低6位
 			shift = uintptr(sys.TrailingZeros64(uint64(et.Size_))) & 63
 		} else {
+			// 如果指针大小为4字节，计算位移量并进行掩码操作保留低5位
 			shift = uintptr(sys.TrailingZeros32(uint32(et.Size_))) & 31
 		}
-		lenmem = uintptr(oldLen) << shift
-		newlenmem = uintptr(newLen) << shift
-		capmem = roundupsize(uintptr(newcap) << shift)
-		overflow = uintptr(newcap) > (maxAlloc >> shift)
-		newcap = int(capmem >> shift)
-		capmem = uintptr(newcap) << shift
+
+		lenmem = uintptr(oldLen) << shift    // 计算旧长度的内存大小并左移位移量
+		newlenmem = uintptr(newLen) << shift // 计算新长度的内存大小并左移位移量
+		// 对容量进行向上取整的优化计算
+		capmem = roundupsize(uintptr(newcap) << shift)   // 计算新容量的内存大小并左移位移量，然后向上取整
+		overflow = uintptr(newcap) > (maxAlloc >> shift) // 检查新容量是否超出最大分配内存限制并考虑位移
+		newcap = int(capmem >> shift)                    // 更新新容量为向上取整后的值右移位移量
+		capmem = uintptr(newcap) << shift                // 更新容量为新容量左移位移量
+
 	default:
-		lenmem = uintptr(oldLen) * et.Size_
-		newlenmem = uintptr(newLen) * et.Size_
-		capmem, overflow = math.MulUintptr(et.Size_, uintptr(newcap))
-		capmem = roundupsize(capmem)
-		newcap = int(capmem / et.Size_)
-		capmem = uintptr(newcap) * et.Size_
+		lenmem = uintptr(oldLen) * et.Size_    // 计算旧长度的内存大小（一般情况下）
+		newlenmem = uintptr(newLen) * et.Size_ // 计算新长度的内存大小（一般情况下）
+		// 计算容量并检查是否溢出
+		capmem, overflow = math.MulUintptr(et.Size_, uintptr(newcap)) // 用新容量乘以元素大小计算总内存，同时检查是否溢出
+		// 对容量进行向上取整的优化计算
+		capmem = roundupsize(capmem)        // 计算新容量的内存大小并向上取整
+		newcap = int(capmem / et.Size_)     // 更新新容量为向上取整后的值除以元素大小
+		capmem = uintptr(newcap) * et.Size_ // 更新容量为新容量乘以元素大小
 	}
 
-	// The check of overflow in addition to capmem > maxAlloc is needed
-	// to prevent an overflow which can be used to trigger a segfault
-	// on 32bit architectures with this example program:
-	//
-	// type T [1<<27 + 1]int64
-	//
-	// var d T
-	// var s []T
-	//
-	// func main() {
-	//   s = append(s, d, d, d, d)
-	//   print(len(s), "\n")
-	// }
+	// 检查是否溢出或超出最大分配大小
 	if overflow || capmem > maxAlloc {
 		panic(errorString("growslice: len out of range"))
 	}
 
+	// 分配新的内存
 	var p unsafe.Pointer
 	if et.PtrBytes == 0 {
 		p = mallocgc(capmem, nil, false)
-		// The append() that calls growslice is going to overwrite from oldLen to newLen.
-		// Only clear the part that will not be overwritten.
-		// The reflect_growslice() that calls growslice will manually clear
-		// the region not cleared here.
+		// 只有在新分配的内存中未被覆盖的部分进行清零
 		memclrNoHeapPointers(add(p, newlenmem), capmem-newlenmem)
 	} else {
-		// Note: can't use rawmem (which avoids zeroing of memory), because then GC can scan uninitialized memory.
+		// 注意: 不能使用rawmem (避免内存清零)，因为GC可以扫描未初始化的内存。
 		p = mallocgc(capmem, et, true)
 		if lenmem > 0 && writeBarrier.enabled {
-			// Only shade the pointers in oldPtr since we know the destination slice p
-			// only contains nil pointers because it has been cleared during alloc.
+			// 只需遮蔽旧数组中的指针，因为新数组已被清零
 			bulkBarrierPreWriteSrcOnly(uintptr(p), uintptr(oldPtr), lenmem-et.Size_+et.PtrBytes)
 		}
 	}
+
+	// 复制原有数据到新数组
 	memmove(p, oldPtr, lenmem)
 
+	// 返回新的 slice 结构
 	return slice{p, newLen, newcap}
 }
 
@@ -306,41 +288,48 @@ func isPowerOfTwo(x uintptr) bool {
 	return x&(x-1) == 0
 }
 
-// slicecopy is used to copy from a string or slice of pointerless elements into a slice.
+// 用于从字符串或不含指针的元素切片复制到另一个切片中。
 func slicecopy(toPtr unsafe.Pointer, toLen int, fromPtr unsafe.Pointer, fromLen int, width uintptr) int {
+	// 如果源切片长度为0或目标切片长度为0，则直接返回0，无需复制
 	if fromLen == 0 || toLen == 0 {
 		return 0
 	}
-
+	// 需要复制的元素数量初始化为源切片长度
 	n := fromLen
 	if toLen < n {
+		// 如果目标切片长度 小于 源切片长度，则取目标切片长度作为需要复制的元素数量
 		n = toLen
 	}
 
+	// 如果每个元素的宽度为0，则直接返回需要复制的元素数量n
 	if width == 0 {
 		return n
 	}
 
+	// 计算总共需要复制的字节大小
 	size := uintptr(n) * width
+
 	if raceenabled {
-		callerpc := getcallerpc()
-		pc := abi.FuncPCABIInternal(slicecopy)
-		racereadrangepc(fromPtr, size, callerpc, pc)
-		racewriterangepc(toPtr, size, callerpc, pc)
+		callerpc := getcallerpc()                    // 获取调用者的PC值
+		pc := abi.FuncPCABIInternal(slicecopy)       // 获取函数slicecopy的PC值
+		racereadrangepc(fromPtr, size, callerpc, pc) // 对源地址范围进行读取访问的race检测
+		racewriterangepc(toPtr, size, callerpc, pc)  // 对目标地址范围进行写入访问的race检测
 	}
 	if msanenabled {
-		msanread(fromPtr, size)
-		msanwrite(toPtr, size)
+		msanread(fromPtr, size) // 对源地址范围进行内存清洁读取访问的msan检测
+		msanwrite(toPtr, size)  // 对目标地址范围进行内存清洁写入访问的msan检测
 	}
 	if asanenabled {
-		asanread(fromPtr, size)
-		asanwrite(toPtr, size)
+		asanread(fromPtr, size) // 对源地址范围进行地址清洁读取访问的asan检测
+		asanwrite(toPtr, size)  // 对目标地址范围进行地址清洁写入访问的asan检测
 	}
 
-	if size == 1 { // common case worth about 2x to do here
+	// 如果复制的元素大小为1字节
+	if size == 1 {
 		// TODO: is this still worth it with new memmove impl?
-		*(*byte)(toPtr) = *(*byte)(fromPtr) // known to be a byte pointer
+		*(*byte)(toPtr) = *(*byte)(fromPtr) // 直接按字节进行复制，已知这里是字节指针
 	} else {
+		// 复制原有数据到新数组
 		memmove(toPtr, fromPtr, size)
 	}
 	return n

@@ -28,8 +28,7 @@ const (
 	WASM
 )
 
-// PtrSize is the size of a pointer in bytes - unsafe.Sizeof(uintptr(0)) but as an ideal constant.
-// It is also the size of the machine's native word size (that is, 4 on 32-bit systems, 8 on 64-bit).
+// PtrSize 的值根据系统的位数而变化，如果系统是 64 位，那么 PtrSize 的值将是 8；如果是 32 位，那么 PtrSize 的值将是 4
 const PtrSize = 4 << (^uintptr(0) >> 63)
 
 // ArchFamily is the architecture family (AMD64, ARM, ...)

@@ -442,7 +442,7 @@ type MapType struct {
 	Key    *Type
 	Elem   *Type
 	Bucket *Type // internal type representing a hash bucket
-	// function for hashing keys (ptr to key, seed) -> hash
+	// 哈希键的函数 (ptr到键，种子) -> 哈希
 	Hasher     func(unsafe.Pointer, uintptr) uintptr
 	KeySize    uint8  // size of key slot
 	ValueSize  uint8  // size of elem slot

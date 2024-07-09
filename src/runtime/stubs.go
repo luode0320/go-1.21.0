@@ -93,17 +93,17 @@ func reflect_memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
 	memclrNoHeapPointers(ptr, n)
 }
 
-// memmove copies n bytes from "from" to "to".
+// memmove 复制 n 个字节从 “从” 到 “到”。
 //
-// memmove ensures that any pointer in "from" is written to "to" with
-// an indivisible write, so that racy reads cannot observe a
-// half-written pointer. This is necessary to prevent the garbage
-// collector from observing invalid pointers, and differs from memmove
-// in unmanaged languages. However, memmove is only required to do
-// this if "from" and "to" may contain pointers, which can only be the
-// case if "from", "to", and "n" are all be word-aligned.
+// memmove 确保 “from” 中的任何指针都写入 “to”
+// 不可分割的写入，因此racy读取无法观察到
+// 半写指针。这是必要的，以防止垃圾
+// 收集器不观察无效指针，与memmove不同
+// 在非托管语言中。然而，memmove只需要做
+// 如果 “from” 和 “to” 可能包含指针，它只能是
+// 如果 “from”，“to” 和 “n” 都是单词对齐的，则大小写。
 //
-// Implementations are in memmove_*.s.
+// 实现在memmove_ *.s中。
 //
 //go:noescape
 func memmove(to, from unsafe.Pointer, n uintptr)
