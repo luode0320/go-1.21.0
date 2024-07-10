@@ -8,32 +8,30 @@ import (
 	"unsafe"
 )
 
-// Type is the runtime representation of a Go type.
+// Type 是 Go 类型的运行时表示
 //
-// Type is also referenced implicitly
-// (in the form of expressions involving constants and arch.PtrSize)
-// in cmd/compile/internal/reflectdata/reflect.go
-// and cmd/link/internal/ld/decodesym.go
-// (e.g. data[2*arch.PtrSize+4] references the TFlag field)
-// unsafe.OffsetOf(Type{}.TFlag) cannot be used directly in those
-// places because it varies with cross compilation and experiments.
+// Type 也会被隐式引用
+// （以常量和 arch.PtrSize 相关的表达式形式）
+// 在 cmd/compile/internal/reflectdata/reflect.go 和 cmd/link/internal/ld/decodesym.go 中被引用,
+// （例如 data[2*arch.PtrSize+4] 引用了 TFlag 字段）
+// 在那些地方无法直接使用 unsafe.OffsetOf(Type{}.TFlag)，因为它会随着交叉编译和实验而变化。
 type Type struct {
-	Size_       uintptr
-	PtrBytes    uintptr // number of (prefix) bytes in the type that can contain pointers
-	Hash        uint32  // hash of type; avoids computation in hash tables
-	TFlag       TFlag   // extra type information flags
-	Align_      uint8   // alignment of variable with this type
-	FieldAlign_ uint8   // alignment of struct field with this type
-	Kind_       uint8   // enumeration for C
-	// function for comparing objects of this type
-	// (ptr to object A, ptr to object B) -> ==?
+	Size_       uintptr // 大小
+	PtrBytes    uintptr // 类型中可以包含指针的前缀字节数
+	Hash        uint32  // 类型哈希值；避免在哈希表中计算
+	TFlag       TFlag   // 额外的类型信息标志
+	Align_      uint8   // 变量与此类型的对齐方式
+	FieldAlign_ uint8   // 结构字段与此类型的对齐方式
+	Kind_       uint8   // 用于 C 的枚举
+	// 用于比较该类型对象的函数
+	// (指向对象 A 的指针, 指向对象 B 的指针) -> 是否相等?
 	Equal func(unsafe.Pointer, unsafe.Pointer) bool
-	// GCData stores the GC type data for the garbage collector.
-	// If the KindGCProg bit is set in kind, GCData is a GC program.
-	// Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
+	// GCData 用于垃圾回收器存储 GC 类型数据
+	// 如果 kind 中设置了 KindGCProg 位, GCData 是一个 GC 程序
+	// 否则它是一个指针掩码位图。详细信息请参见 mbitmap.go
 	GCData    *byte
-	Str       NameOff // string form
-	PtrToThis TypeOff // type for pointer to this type, may be zero
+	Str       NameOff // 字符串形式
+	PtrToThis TypeOff // 指向此类型的指针的类型，可能为零
 }
 
 // A Kind represents the specific kind of type that a Type represents.
@@ -412,10 +410,11 @@ func (t *Type) Align() int { return int(t.Align_) }
 
 func (t *Type) FieldAlign() int { return int(t.FieldAlign_) }
 
+// InterfaceType 定义了接口类型的结构
 type InterfaceType struct {
-	Type
-	PkgPath Name      // import path
-	Methods []Imethod // sorted by hash
+	Type    Type      // 类型信息
+	PkgPath Name      // 导入路径
+	Methods []Imethod // 按哈希排序的方法列表
 }
 
 func (t *Type) ExportedMethods() []Method {

@@ -36,44 +36,47 @@ func getitab(inter *interfacetype, typ *_type, canfail bool) *itab {
 		throw("internal error - misuse of itab")
 	}
 
-	// easy case
+	// 简单情况
 	if typ.TFlag&abi.TFlagUncommon == 0 {
+		// 如果是简单情况且可以失败，则返回 nil
 		if canfail {
 			return nil
 		}
+		// 否则创建 TypeAssertionError 错误并抛出
 		name := toRType(&inter.Type).nameOff(inter.Methods[0].Name)
 		panic(&TypeAssertionError{nil, typ, &inter.Type, name.Name()})
 	}
 
 	var m *itab
 
-	// First, look in the existing table to see if we can find the itab we need.
-	// This is by far the most common case, so do it without locks.
-	// Use atomic to ensure we see any previous writes done by the thread
-	// that updates the itabTable field (with atomic.Storep in itabAdd).
+	// 首先，在不使用锁的情况下检查现有表中是否存在需要的 itab
+	// 这是最常见的情况，因此不使用锁
+	// 使用 atomic 来确保我们看到由更新 itabTable 字段的线程执行的任何先前写入操作
 	t := (*itabTableType)(atomic.Loadp(unsafe.Pointer(&itabTable)))
+	// 在 itabTable 中查找给定的接口/类型对。 如果给定的接口/类型对不存在，则返回 nil。
 	if m = t.find(inter, typ); m != nil {
 		goto finish
 	}
 
-	// Not found.  Grab the lock and try again.
+	// 没找到。获得锁并再次尝试
 	lock(&itabLock)
+	// 在 itabTable 中查找给定的接口/类型对。 如果给定的接口/类型对不存在，则返回 nil。
 	if m = itabTable.find(inter, typ); m != nil {
 		unlock(&itabLock)
 		goto finish
 	}
 
-	// Entry doesn't exist yet. Make a new entry & add it.
+	// 条目不存在。创建一个新条目并添加
 	m = (*itab)(persistentalloc(unsafe.Sizeof(itab{})+uintptr(len(inter.Methods)-1)*goarch.PtrSize, 0, &memstats.other_sys))
 	m.inter = inter
 	m._type = typ
-	// The hash is used in type switches. However, compiler statically generates itab's
-	// for all interface/type pairs used in switches (which are added to itabTable
-	// in itabsinit). The dynamically-generated itab's never participate in type switches,
-	// and thus the hash is irrelevant.
-	// Note: m.hash is _not_ the hash used for the runtime itabTable hash table.
+	// 哈希用于类型切换。但是，编译器静态生成适用于 switch 的所有接口/类型对的 itab
+	// （这些 itab 在 itabsinit 中添加到 itabTable 中）。动态生成的 itab 不参与
+	// 类型切换，因此哈希是不相关的。
+	// 注意：m.hash 不是运行时 itabTable 哈希表使用的哈希值。
 	m.hash = 0
 	m.init()
+	// 将给定的 itab 添加到 itab 哈希表中。必须持有 itab 锁。
 	itabAdd(m)
 	unlock(&itabLock)
 finish:
@@ -83,73 +86,72 @@ finish:
 	if canfail {
 		return nil
 	}
-	// this can only happen if the conversion
-	// was already done once using the , ok form
-	// and we have a cached negative result.
-	// The cached result doesn't record which
-	// interface function was missing, so initialize
-	// the itab again to get the missing function name.
+	// 这只会在已使用 , ok 形式的一次转换
+	// 并且我们有一个缓存的负面结果时发生。
+	// 缓存的结果不记录缺少的接口函数，因此重新初始化 itab
+	// 以获取缺少的函数名称。
 	panic(&TypeAssertionError{concrete: typ, asserted: &inter.Type, missingMethod: m.init()})
 }
 
-// find finds the given interface/type pair in t.
-// Returns nil if the given interface/type pair isn't present.
+// 在 itabTable 中查找给定的接口/类型对。 如果给定的接口/类型对不存在，则返回 nil。
 func (t *itabTableType) find(inter *interfacetype, typ *_type) *itab {
-	// Implemented using quadratic probing.
-	// Probe sequence is h(i) = h0 + i*(i+1)/2 mod 2^k.
-	// We're guaranteed to hit all table entries using this probe sequence.
+	// 使用二次探测法实现。
+	// 探测序列为 h(i) = h0 + i*(i+1)/2 mod 2^k。
+	// 使用此探测序列可确保访问到所有表项。
 	mask := t.size - 1
+	// 计算初始哈希值
 	h := itabHashFunc(inter, typ) & mask
+	// 开始二次探测循环
 	for i := uintptr(1); ; i++ {
+		// 根据当前哈希值计算数组索引
 		p := (**itab)(add(unsafe.Pointer(&t.entries), h*goarch.PtrSize))
-		// Use atomic read here so if we see m != nil, we also see
-		// the initializations of the fields of m.
+		// 在这里使用原子读取，以便如果看到 m != nil，则还要看到 m 字段的初始化。
 		// m := *p
 		m := (*itab)(atomic.Loadp(unsafe.Pointer(p)))
+		// 检查该位置的 itab 是否为空，如果为空则表示未找到对应的映射
 		if m == nil {
 			return nil
 		}
+		// 检查找到的 itab 是否匹配目标的接口和类型
 		if m.inter == inter && m._type == typ {
-			return m
+			return m // 找到了匹配的 itab，返回之
 		}
+		// 更新哈希值，进行下一次探测
 		h += i
 		h &= mask
 	}
 }
 
-// itabAdd adds the given itab to the itab hash table.
-// itabLock must be held.
+// 将给定的 itab 添加到 itab 哈希表中。必须持有 itab 锁。
 func itabAdd(m *itab) {
-	// Bugs can lead to calling this while mallocing is set,
-	// typically because this is called while panicking.
-	// Crash reliably, rather than only when we need to grow
-	// the hash table.
+	// 存在错误可能导致在分配内存时调用该函数，
+	// 通常是因为在 panic 时调用了该函数。
+	// 可靠地引发崩溃，而不仅仅是在需要扩展哈希表时才引发。
 	if getg().m.mallocing != 0 {
 		throw("malloc deadlock")
 	}
 
 	t := itabTable
-	if t.count >= 3*(t.size/4) { // 75% load factor
-		// Grow hash table.
-		// t2 = new(itabTableType) + some additional entries
-		// We lie and tell malloc we want pointer-free memory because
-		// all the pointed-to values are not in the heap.
+	if t.count >= 3*(t.size/4) { // 75% 负载因子
+		// 扩展哈希表。
+		// t2 = new(itabTableType) + 一些额外的表项
+		// 我们欺骗 malloc，告诉它我们希望得到无指针的内存，因为所有指向的值都不在堆中。
 		t2 := (*itabTableType)(mallocgc((2+2*t.size)*goarch.PtrSize, nil, true))
 		t2.size = t.size * 2
 
-		// Copy over entries.
-		// Note: while copying, other threads may look for an itab and
-		// fail to find it. That's ok, they will then try to get the itab lock
-		// and as a consequence wait until this copying is complete.
+		// 复制条目。
+		// 注意：在复制过程中，其他线程可能在查找 itab 时失败。
+		// 这没有关系，它们接下来会尝试获取 itab 锁，
+		// 结果等到此复制完成。
 		iterate_itabs(t2.add)
 		if t2.count != t.count {
 			throw("mismatched count during itab table copy")
 		}
-		// Publish new hash table. Use an atomic write: see comment in getitab.
+		// 发布新的哈希表。使用原子写入：参见 getitab 中的注释。
 		atomicstorep(unsafe.Pointer(&itabTable), unsafe.Pointer(t2))
-		// Adopt the new table as our own.
+		// 将新表格作为自己的表格。
 		t = itabTable
-		// Note: the old table can be GC'ed here.
+		// 注意：旧表在此处可能被 GC。
 	}
 	t.add(m)
 }
