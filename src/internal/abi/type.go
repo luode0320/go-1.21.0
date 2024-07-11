@@ -412,7 +412,7 @@ func (t *Type) FieldAlign() int { return int(t.FieldAlign_) }
 
 // InterfaceType 定义了接口类型的结构
 type InterfaceType struct {
-	Type    Type      // 类型信息
+	Type              // 类型信息
 	PkgPath Name      // 导入路径
 	Methods []Imethod // 按哈希排序的方法列表
 }
