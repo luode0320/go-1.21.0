@@ -93,17 +93,11 @@ func reflect_memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
 	memclrNoHeapPointers(ptr, n)
 }
 
-// memmove 复制 n 个字节从 “从” 到 “到”。
-//
-// memmove 确保 “from” 中的任何指针都写入 “to”
-// 不可分割的写入，因此racy读取无法观察到
-// 半写指针。这是必要的，以防止垃圾
-// 收集器不观察无效指针，与memmove不同
-// 在非托管语言中。然而，memmove只需要做
-// 如果 “from” 和 “to” 可能包含指针，它只能是
-// 如果 “from”，“to” 和 “n” 都是单词对齐的，则大小写。
-//
-// 实现在memmove_ *.s中。
+// 将源地址 from 处开始的连续 n 个字节复制到目标地址 to 处
+
+// to：要将数据复制到的目标内存地址
+// from：要从中复制数据的源内存地址
+// n：要复制的字节数
 //
 //go:noescape
 func memmove(to, from unsafe.Pointer, n uintptr)
