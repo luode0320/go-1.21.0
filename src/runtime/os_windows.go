@@ -510,29 +510,47 @@ func initLongPathSupport() {
 	canUseLongPaths = true
 }
 
+// 初始化过程确保了 Go 程序在 Windows 环境下的兼容性和性能，同时处理了一些操作系统级别的细节
+// 如错误处理、时间精度、多核利用和内存管理。
 func osinit() {
+	// 是一个用于调用 Windows 的 stdcall 调用约定的函数地址。
+	// 这里使用 unsafe.Pointer 和 abi 包来获取 asmstdcall 函数的地址。
 	asmstdcallAddr = unsafe.Pointer(abi.FuncPCABI0(asmstdcall))
 
+	// 加载可选的系统调用。这些调用可能依赖于特定的 Windows 版本或者配置。
 	loadOptionalSyscalls()
 
+	// 阻止错误对话框的显示，这通常用于服务器环境，避免出现用户界面。
 	preventErrorDialogs()
 
+	// 初始化异常处理程序，用于捕获和处理未捕获的异常。
 	initExceptionHandler()
 
+	// 初始化高分辨率定时器，这是为了提高时间精度和性能。
 	initHighResTimer()
+
+	// 存储了设置系统定时器分辨率的返回值。
+	// 参数 osRelax(false) 表示是否放松定时器分辨率要求。
 	timeBeginPeriodRetValue = osRelax(false)
 
+	// 初始化系统目录路径，这有助于确定系统文件的位置。
 	initSysDirectory()
+
+	// 初始化长路径支持，以便在 Windows 上使用超过 260 字符的路径。
 	initLongPathSupport()
 
+	// 获取系统当前的处理器核心数量。
 	ncpu = getproccount()
 
+	// 获取物理页面大小，这对于内存分配和管理至关重要。
 	physPageSize = getPageSize()
 
-	// Windows dynamic priority boosting assumes that a process has different types
-	// of dedicated threads -- GUI, IO, computational, etc. Go processes use
-	// equivalent threads that all do a mix of GUI, IO, computations, etc.
-	// In such context dynamic priority boosting does nothing but harm, so we turn it off.
+	// 禁用 Windows 动态优先级提升功能。
+	// Windows 的动态优先级提升假设进程有不同的专用线程类型（GUI、I/O、计算等），
+	// 但是 Go 进程使用的是等效线程，它们混合执行 GUI、I/O 和计算任务。
+	// 在这种情况下，动态优先级提升不仅无效，反而可能有害，所以我们将其关闭。
+	// stdcall2 是用于调用 Windows API 的封装函数，_SetProcessPriorityBoost 是对应的 API 名称。
+	// 第二个参数是当前进程句柄，第三个参数为 1 表示关闭动态优先级提升。
 	stdcall2(_SetProcessPriorityBoost, currentProcess, 1)
 }
 
@@ -913,8 +931,8 @@ func exitThread(wait *atomic.Uint32) {
 	throw("exitThread")
 }
 
-// Called to initialize a new m (including the bootstrap m).
-// Called on the parent thread (main thread in case of bootstrap), can allocate memory.
+// 调用以初始化一个新的m (包括bootstrap m)。
+// 在父线程上调用 (主线程在引导的情况下)，可以分配内存。
 func mpreinit(mp *m) {
 }
 

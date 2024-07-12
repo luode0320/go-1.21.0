@@ -131,7 +131,7 @@ var main_init_done chan bool
 //go:linkname main_main main.main
 func main_main()
 
-// mainStarted indicates that the main M has started.
+// mainStarted 表示主M已启动。
 var mainStarted bool
 
 // runtimeInitTime is the nanotime() at which the runtime started.
@@ -534,27 +534,22 @@ func lockedOSThread() bool {
 }
 
 var (
-	// allgs contains all Gs ever created (including dead Gs), and thus
-	// never shrinks.
+	// allgs 包含了所有曾经创建过的 G（包括已经死亡的 G），因此不会缩小。
 	//
-	// Access via the slice is protected by allglock or stop-the-world.
-	// Readers that cannot take the lock may (carefully!) use the atomic
-	// variables below.
+	// 通过切片访问受到 allglock 或 stop-the-world 的保护。
+	// 不能获取锁的读取者可以（谨慎地！）使用下面的原子变量。
 	allglock mutex
 	allgs    []*g
 
-	// allglen and allgptr are atomic variables that contain len(allgs) and
-	// &allgs[0] respectively. Proper ordering depends on totally-ordered
-	// loads and stores. Writes are protected by allglock.
+	// allglen 和 allgptr 是原子变量，分别包含 len(allgs) 和 &allgs[0]。
+	// 适当的顺序取决于全序加载和存储。写操作受 allglock 保护。
 	//
-	// allgptr is updated before allglen. Readers should read allglen
-	// before allgptr to ensure that allglen is always <= len(allgptr). New
-	// Gs appended during the race can be missed. For a consistent view of
-	// all Gs, allglock must be held.
+	// 在更新 allgptr 之前更新 allglen。读取者应该在读取 allgptr 之前先读取 allglen，
+	// 以确保 allglen 始终 <= len(allgptr)。在比赛期间追加新 G 可能会被错过。
+	// 为了获得所有 G 的一致视图，必须持有 allglock。
 	//
-	// allgptr copies should always be stored as a concrete type or
-	// unsafe.Pointer, not uintptr, to ensure that GC can still reach it
-	// even if it points to a stale array.
+	// allgptr 的复制应始终存储为具体类型或 unsafe.Pointer，而不是 uintptr，以确保 GC
+	// 仍然可以到达它，即使它指向了一个过时的数组。
 	allglen uintptr
 	allgptr **g
 )
@@ -683,99 +678,115 @@ func getGodebugEarly() string {
 	return env
 }
 
-// The bootstrap sequence is:
+// 启动序列如下：
 //
-//	call osinit
-//	call schedinit
-//	make & queue new G
-//	call runtime·mstart
-//
-// The new G calls runtime·main.
+// 调用 runtime.osinit
+// 调用 runtime.schedinit
+// 创建并排队新的 G
+// 调用 runtime.mstart
+// 新的 G 调用 runtime.main
 func schedinit() {
-	lockInit(&sched.lock, lockRankSched)
-	lockInit(&sched.sysmonlock, lockRankSysmon)
-	lockInit(&sched.deferlock, lockRankDefer)
-	lockInit(&sched.sudoglock, lockRankSudog)
-	lockInit(&deadlock, lockRankDeadlock)
-	lockInit(&paniclk, lockRankPanic)
-	lockInit(&allglock, lockRankAllg)
-	lockInit(&allpLock, lockRankAllp)
-	lockInit(&reflectOffs.lock, lockRankReflectOffs)
-	lockInit(&finlock, lockRankFin)
-	lockInit(&cpuprof.lock, lockRankCpuprof)
+	// 初始化多个锁，用于运行时内部的同步和互斥。
+	// 每个锁都分配了特定的等级，以避免死锁。
+	// 这些锁包括但不限于调度器锁、系统监控锁、defer 锁等。
+	// 初始化锁的等级是运行时调度和并发控制的关键部分。
+	lockInit(&sched.lock, lockRankSched)             // 初始化 sched.lock，调度器锁，锁等级为 lockRankSched。
+	lockInit(&sched.sysmonlock, lockRankSysmon)      // 初始化 sched.sysmonlock，系统监控锁，锁等级为 lockRankSysmon。
+	lockInit(&sched.deferlock, lockRankDefer)        // 初始化 sched.deferlock，defer 锁，锁等级为 lockRankDefer。
+	lockInit(&sched.sudoglock, lockRankSudog)        // 初始化 sched.sudoglock，sudog 锁，锁等级为 lockRankSudog。
+	lockInit(&deadlock, lockRankDeadlock)            // 初始化 deadlock，死锁锁，锁等级为 lockRankDeadlock。
+	lockInit(&paniclk, lockRankPanic)                // 初始化 paniclk，panic 锁，锁等级为 lockRankPanic。
+	lockInit(&allglock, lockRankAllg)                // 初始化 allglock，所有 G 的锁，锁等级为 lockRankAllg。
+	lockInit(&allpLock, lockRankAllp)                // 初始化 allpLock，所有 P 的锁，锁等级为 lockRankAllp。
+	lockInit(&reflectOffs.lock, lockRankReflectOffs) // 初始化 reflectOffs.lock，反射包 Offs 锁，锁等级为 lockRankReflectOffs。
+	lockInit(&finlock, lockRankFin)                  // 初始化 finlock，终结锁，锁等级为 lockRankFin。
+	lockInit(&cpuprof.lock, lockRankCpuprof)         // 初始化 cpuprof.lock，CPU 分析锁，锁等级为 lockRankCpuprof。
+	// 初始化 allocmLock，M 分配锁，锁等级为 lockRankAllocmR、lockRankAllocmRInternal、lockRankAllocmW。
 	allocmLock.init(lockRankAllocmR, lockRankAllocmRInternal, lockRankAllocmW)
+	// 初始化 execLock，执行锁，锁等级为 lockRankExecR、lockRankExecRInternal、lockRankExecW。
 	execLock.init(lockRankExecR, lockRankExecRInternal, lockRankExecW)
+	// 初始化 traceLock。
 	traceLockInit()
-	// Enforce that this lock is always a leaf lock.
-	// All of this lock's critical sections should be
-	// extremely short.
+	// 初始化 memstats.heapStats.noPLock，堆统计锁，锁等级为 lockRankLeafRank，确保它始终是叶子锁。
+	// 所有此锁的关键部分都应该非常短。
 	lockInit(&memstats.heapStats.noPLock, lockRankLeafRank)
 
-	// raceinit must be the first call to race detector.
-	// In particular, it must be done before mallocinit below calls racemapshadow.
+	// 返回当前 G 的指针, 取出g0
 	gp := getg()
+
+	// 如果启用了 race 检测器，raceinit 必须是第一个调用的函数。
+	// raceinit 在调用 mallocinit 之前完成，避免在初始化期间发生竞争条件。
 	if raceenabled {
 		gp.racectx, raceprocctx0 = raceinit()
 	}
 
+	// 设置最大 m（操作系统线程）数量。
 	sched.maxmcount = 10000
 
-	// The world starts stopped.
+	// 世界开始时是停止的。
 	worldStopped()
 
-	moduledataverify()
-	stackinit()
-	mallocinit()
-	godebug := getGodebugEarly()
-	initPageTrace(godebug) // must run after mallocinit but before anything allocates
-	cpuinit(godebug)       // must run before alginit
-	alginit()              // maps, hash, fastrand must not be used before this call
-	fastrandinit()         // must run before mcommoninit
-	mcommoninit(gp.m, -1)
-	modulesinit()   // provides activeModules
-	typelinksinit() // uses maps, activeModules
-	itabsinit()     // uses activeModules
-	stkobjinit()    // must run before GC starts
+	// 验证模块数据，初始化栈，内存分配器，调试设置等。
+	// 这些步骤确保了运行时的基本结构和功能就绪。
+	moduledataverify()           // 验证模块数据
+	stackinit()                  // 初始化栈
+	mallocinit()                 // 初始化内存分配器
+	godebug := getGodebugEarly() // 获取早期的 Godebug 设置
+	initPageTrace(godebug)       // 初始化页跟踪，必须在 mallocinit 之后但在任何分配发生之前运行。
+	cpuinit(godebug)             // 初始化 CPU，必须在 alginit 之前运行。
+	alginit()                    // 初始化算法，如哈希映射、随机数生成等，必须在使用之前调用。
+	fastrandinit()               // 初始化快速随机数生成器，必须在 mcommoninit 之前运行。
+	mcommoninit(gp.m, -1)        // 初始化当前 g0 的 m0 结构体
+	modulesinit()                // 初始化模块，提供 activeModules。
+	typelinksinit()              // 初始化类型链接，使用 maps 和 activeModules。
+	itabsinit()                  // 初始化接口表，使用 activeModules。
+	stkobjinit()                 // 初始化栈对象，必须在 GC 开始之前运行。
 
-	sigsave(&gp.m.sigmask)
-	initSigmask = gp.m.sigmask
+	sigsave(&gp.m.sigmask)     // 保存信号掩码，用于后续恢复。
+	initSigmask = gp.m.sigmask // 记录初始信号掩码。
 
-	goargs()
-	goenvs()
-	secure()
-	parsedebugvars()
-	gcinit()
+	goargs()         // 解析命令行参数。
+	goenvs()         // 解析环境变量。
+	secure()         // 设置安全模式，可能会影响某些运行时行为。
+	parsedebugvars() // 解析调试变量，可能会影响运行时的调试和性能配置。
+	gcinit()         // 初始化 GC（垃圾回收）。
 
-	// if disableMemoryProfiling is set, update MemProfileRate to 0 to turn off memprofile.
-	// Note: parsedebugvars may update MemProfileRate, but when disableMemoryProfiling is
-	// set to true by the linker, it means that nothing is consuming the profile, it is
-	// safe to set MemProfileRate to 0.
+	// 如果禁用了内存剖析，更新 MemProfileRate 为 0 以关闭内存剖析。
 	if disableMemoryProfiling {
 		MemProfileRate = 0
 	}
 
+	// 加锁，更新调度器状态。
 	lock(&sched.lock)
+	// 设置上次网络轮询的时间戳，这将用于后续的网络 I/O 调度决策。
 	sched.lastpoll.Store(nanotime())
+
+	// ncpu 在 runtime.osinit 时已经获取
 	procs := ncpu
+	// 如果GOMAXPROCS设置并且合法就将procs的设置为GOMAXPROCS
 	if n, ok := atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
 		procs = n
 	}
+
+	// 调整处理器数量，返回包含本地工作列表的 P 的列表，需要由调用者调度, 确保有足够的 P 来处理 goroutine。
+	// 如果调整失败，会抛出异常。
 	if procresize(procs) != nil {
 		throw("unknown runnable goroutine during bootstrap")
 	}
+
+	// 解锁，允许其他调度器操作。
 	unlock(&sched.lock)
 
-	// World is effectively started now, as P's can run.
+	// 世界现在实际上已经启动，P 可以运行了。
 	worldStarted()
 
+	// 确保构建版本和模块信息被记录在二进制文件中。
 	if buildVersion == "" {
-		// Condition should never trigger. This code just serves
-		// to ensure runtime·buildVersion is kept in the resulting binary.
+		// 不应触发此条件，但确保 runtime·buildVersion 被保留。
 		buildVersion = "unknown"
 	}
 	if len(modinfo) == 1 {
-		// Condition should never trigger. This code just serves
-		// to ensure runtime·modinfo is kept in the resulting binary.
+		// 同样，不应触发此条件，但确保 runtime·modinfo 被保留。
 		modinfo = ""
 	}
 }
@@ -821,51 +832,62 @@ func mReserveID() int64 {
 	return id
 }
 
-// Pre-allocated ID may be passed as 'id', or omitted by passing -1.
+// 如果传递了预分配的 ID，则作为 'id' 参数，或者通过传入 -1 来省略它。
 func mcommoninit(mp *m, id int64) {
+	// 返回当前 G 的指针
 	gp := getg()
 
-	// g0 stack won't make sense for user (and is not necessary unwindable).
+	// g0 的栈对用户没有意义（且不一定可逆向），所以仅当 gp 不等于其自身的 g0 时才进行调用者追踪。
 	if gp != gp.m.g0 {
 		callers(1, mp.createstack[:])
 	}
 
+	// 获取调度器锁，以确保线程安全。
 	lock(&sched.lock)
 
+	// 如果提供了 ID，则直接使用；否则，从全局资源池中预留一个 ID。
 	if id >= 0 {
 		mp.id = id
 	} else {
+		// 返回用于新m的下一个ID
 		mp.id = mReserveID()
 	}
 
+	// 使用散列函数生成两个 32 位的随机数，一个基于 m 的 ID，另一个基于当前时间。
 	lo := uint32(int64Hash(uint64(mp.id), fastrandseed))
 	hi := uint32(int64Hash(uint64(cputicks()), ^fastrandseed))
+	// 如果生成的随机数全为 0，则强制 hi 为 1，以避免全 0 的情况。
 	if lo|hi == 0 {
 		hi = 1
 	}
-	// Same behavior as for 1.17.
-	// TODO: Simplify this.
+
+	// 根据系统字节序（大端或小端）来组合生成的低 32 位和高 32 位随机数，形成 fastrand。
+	// 这是为了保证跨平台的一致性。
 	if goarch.BigEndian {
 		mp.fastrand = uint64(lo)<<32 | uint64(hi)
 	} else {
 		mp.fastrand = uint64(hi)<<32 | uint64(lo)
 	}
 
+	// 调用 mpreinit 来进一步初始化 m 结构体。
 	mpreinit(mp)
+
+	// 如果 m 中存在信号处理 goroutine，则更新其 stackguard1 值。
 	if mp.gsignal != nil {
 		mp.gsignal.stackguard1 = mp.gsignal.stack.lo + stackGuard
 	}
 
-	// Add to allm so garbage collector doesn't free g->m
-	// when it is just in a register or thread-local storage.
+	// 将 m 添加到 allm 所有的m构成的一个链表列表中，这样垃圾收集器就不会误删掉与 m 关联的 goroutine。
+	// 当 m 仅在寄存器或线程本地存储中时，这是必要的。
 	mp.alllink = allm
 
-	// NumCgoCall() iterates over allm w/o schedlock,
-	// so we need to publish it safely.
+	// NumCgoCall() 函数会在不持有调度器锁的情况下遍历 allm，
+	// 所以我们安全地发布 mp，以确保其他 goroutine 可以看到这个变化。
 	atomicstorep(unsafe.Pointer(&allm), unsafe.Pointer(mp))
 	unlock(&sched.lock)
 
-	// Allocate memory to hold a cgo traceback if the cgo call crashes.
+	// 如果在 C 代码中调用 Go，或者在 Solaris、Illumos 或 Windows 上运行，
+	// 则分配内存以保存 C 调用堆栈的回溯信息，以防 C 代码中的崩溃。
 	if iscgo || GOOS == "solaris" || GOOS == "illumos" || GOOS == "windows" {
 		mp.cgoCallers = new(cgoCallers)
 	}
@@ -1517,95 +1539,107 @@ func mStackIsSystemAllocated() bool {
 	return false
 }
 
-// mstart is the entry-point for new Ms.
-// It is written in assembly, uses ABI0, is marked TOPFRAME, and calls mstart0.
+// 它是用程序集编写的，使用ABI0，标记为TOPFRAME，并调用mstart0。
 func mstart()
 
-// mstart0 is the Go entry-point for new Ms.
-// This must not split the stack because we may not even have stack
-// bounds set up yet.
+// 是 Go 运行时中新创建的 M（机器线程）的入口点。
+// 这个函数不能分割栈，因为我们可能还没有设置好栈边界。
 //
-// May run during STW (because it doesn't have a P yet), so write
-// barriers are not allowed.
+// 可能在停止世界(STW, Stop-The-World)期间运行（因为它没有分配给它一个 P），所以不允许使用写屏障。
 //
-//go:nosplit
-//go:nowritebarrierrec
+//go:nosplit  // 表示编译器不应在此函数中插入栈检查点
+//go:nowritebarrierrec  // 表示在这个函数中不应该记录写入的屏障
 func mstart0() {
+	// 获取当前正在运行的 g 结构，即 goroutine。
 	gp := getg()
 
+	// 判断是否是操作系统分配的栈
 	osStack := gp.stack.lo == 0
 	if osStack {
-		// Initialize stack bounds from system stack.
-		// Cgo may have left stack size in stack.hi.
-		// minit may update the stack bounds.
+		// 从系统栈初始化栈边界。
+		// Cgo 可能已经在 stack.hi 中留下了栈大小。
+		// minit 可能会更新栈边界。
 		//
-		// Note: these bounds may not be very accurate.
-		// We set hi to &size, but there are things above
-		// it. The 1024 is supposed to compensate this,
-		// but is somewhat arbitrary.
+		// 注意：这些边界可能不是非常准确。
+		// 我们把 hi 设置为 &size，但是上面还有其他东西。
+		// 1024 是为了补偿这个，但有些随意。
+		//
+		// 获取栈大小
 		size := gp.stack.hi
 		if size == 0 {
+			// 如果没有栈大小信息，初始化为默认大小
 			size = 16384 * sys.StackGuardMultiplier
 		}
+		// 设置栈的高边界为 size 的地址
 		gp.stack.hi = uintptr(noescape(unsafe.Pointer(&size)))
+		// 设置栈的低边界为高边界减去栈大小加上一定的偏移量
 		gp.stack.lo = gp.stack.hi - size + 1024
 	}
-	// Initialize stack guard so that we can start calling regular
-	// Go code.
+
+	// 初始化栈保护区，这样我们就可以开始调用常规的 Go 代码。
 	gp.stackguard0 = gp.stack.lo + stackGuard
-	// This is the g0, so we can also call go:systemstack
-	// functions, which check stackguard1.
+	// 这是 g0，所以我们也可以调用 go:systemstack 函数，
+	// 这些函数会检查 stackguard1。
 	gp.stackguard1 = gp.stackguard0
+
+	// 调用 mstart1 继续 M 的初始化过程。
+	// 开始 m0 开始运行
 	mstart1()
 
-	// Exit this thread.
+	// 退出这个线程。
+	// 判断栈是否是由系统分配的
 	if mStackIsSystemAllocated() {
-		// Windows, Solaris, illumos, Darwin, AIX and Plan 9 always system-allocate
-		// the stack, but put it in gp.stack before mstart,
-		// so the logic above hasn't set osStack yet.
+		// Windows, Solaris, illumos, Darwin, AIX 和 Plan 9 总是系统分配栈，
+		// 但是在 mstart 之前就已经放入了 gp.stack，
+		// 所以上面的逻辑还没有设置 osStack。
 		osStack = true
 	}
+	// 调用 mexit 来释放资源和结束线程，参数指示栈是否由系统分配。
 	mexit(osStack)
 }
 
-// The go:noinline is to guarantee the getcallerpc/getcallersp below are safe,
-// so that we can set up g0.sched to return to the call of mstart1 above.
+// go:noinline 修饰符确保了 getcallerpc 和 getcallersp 的调用是安全的，
+// 这样我们就可以设置 g0.sched 以返回到 mstart1 在 mstart0 中的调用之上。
 //
 //go:noinline
 func mstart1() {
+	// 获取当前正在运行的 g 结构，即 goroutine。
 	gp := getg()
 
+	// 如果 gp 不等于 gp.m.g0，抛出错误，这表示 g0 没有正确设置。
 	if gp != gp.m.g0 {
 		throw("bad runtime·mstart")
 	}
 
-	// Set up m.g0.sched as a label returning to just
-	// after the mstart1 call in mstart0 above, for use by goexit0 and mcall.
-	// We're never coming back to mstart1 after we call schedule,
-	// so other calls can reuse the current frame.
-	// And goexit0 does a gogo that needs to return from mstart1
-	// and let mstart0 exit the thread.
-	gp.sched.g = guintptr(unsafe.Pointer(gp))
-	gp.sched.pc = getcallerpc()
-	gp.sched.sp = getcallersp()
+	// 设置 m.g0.sched 为一个标记，返回到 mstart0 中 mstart1 调用的紧接后方， 供 goexit0 和 mcall 使用。
+	// 我们在调用 schedule 之后永远不会回到 mstart1， 所以其他调用可以重用当前的栈帧。
+	// goexit0 使用 gogo 语句需要从 mstart1 返回， 并允许 mstart0 退出线程。
+	gp.sched.g = guintptr(unsafe.Pointer(gp)) // 设置 g0 的 g 指向自身。
+	gp.sched.pc = getcallerpc()               // 设置 g0 的 pc 为调用者（mstart1 的调用者）的程序计数器。
+	gp.sched.sp = getcallersp()               // 设置 g0 的 sp 为调用者（mstart1 的调用者）的栈指针。
 
+	// 装载汇编初始化函数，进行平台特定的初始化。
 	asminit()
+	// 进行 Go 运行时的初始化。
 	minit()
 
-	// Install signal handlers; after minit so that minit can
-	// prepare the thread to be able to handle the signals.
+	// 安装信号处理器；在 minit 之后安装，以便 minit 可以准备线程来处理信号。
 	if gp.m == &m0 {
-		mstartm0()
+		mstartm0() // 对于 m0，执行额外的初始化。
 	}
 
+	// 调用 mstartfn，如果定义的话。
 	if fn := gp.m.mstartfn; fn != nil {
-		fn()
+		fn() // 执行用户定义的 M 开始函数。
 	}
 
+	// 对于非 m0 的 M，从 nextp 列表中获取一个 P，准备执行 goroutine
 	if gp.m != &m0 {
-		acquirep(gp.m.nextp.ptr())
-		gp.m.nextp = 0
+		acquirep(gp.m.nextp.ptr()) // 获取一个 P，从 gp.m.nextp 指定的 P 列表中。
+		gp.m.nextp = 0             // 清除 gp.m.nextp，表示 M 已经获取了一个 P。
 	}
+
+	// 启动调度器，开始执行 goroutine。
 	schedule()
 }
 
@@ -4466,103 +4500,150 @@ func malg(stacksize int32) *g {
 	return newg
 }
 
-// Create a new g running fn.
-// Put it on the queue of g's waiting to run.
-// The compiler turns a go statement into a call to this.
+// 创建一个新的 goroutine 来运行 fn 函数。
+// 将这个 goroutine 放入等待运行的 goroutine 队列中。
+// 编译器将 go 语句转换为对这个函数的调用。
 func newproc(fn *funcval) {
+	// 获取当前正在运行的 goroutine。
 	gp := getg()
+	// 获取调用者（即创建新的 goroutine 的位置）的程序计数器（PC），用于后续的调用者信息记录。
 	pc := getcallerpc()
+
+	// 函数在一个更大的系统栈上执行接下来的操作。
+	// 这是因为创建 goroutine 可能涉及大量的栈空间消耗，尤其是当递归创建 goroutine 时。
 	systemstack(func() {
+		// 实际创建新的 goroutine，传入要运行的函数 fn、当前 goroutine gp 和调用者 PC
 		newg := newproc1(fn, gp, pc)
 
+		//  获取当前正在运行的 goroutine 所关联的处理器（P），这是为了将新创建的 goroutine 放入正确的运行队列中。
 		pp := getg().m.p.ptr()
+
+		// 将新创建的 goroutine 放入 P 的运行队列中，准备运行。
 		runqput(pp, newg, true)
 
+		// 如果 main 函数已经开始运行，调用 wakep 函数来唤醒一个等待的处理器（P）
+		// 这有助于确保新创建的 goroutine 能够尽快获得执行的机会。
 		if mainStarted {
 			wakep()
 		}
 	})
 }
 
-// Create a new g in state _Grunnable, starting at fn. callerpc is the
-// address of the go statement that created this. The caller is responsible
-// for adding the new g to the scheduler.
+// 创建一个新的 goroutine，状态为 _Grunnable，从 fn 函数开始执行。
+// (表示此 goroutine 在运行队列上。它当前没有执行用户代码。栈没有所有权)
+//
+// callerpc 是创建这个 goroutine 的 go 语句的地址。
+// 调用者负责将新创建的 goroutine 添加到调度器中。
 func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
+	// 如果 fn 为 nil，致命错误
 	if fn == nil {
 		fatal("go of nil func value")
 	}
 
-	mp := acquirem() // disable preemption because we hold M and P in local vars.
+	// 获取一个 M，禁用抢占，因为我们持有 M 和 P 的局部变量
+	mp := acquirem()
+	// 获取当前 M 所关联的 P
 	pp := mp.p.ptr()
+
+	// 尝试从 P 的空闲 goroutine 队列中获取一个 goroutine，如果没有，则分配一个新的 goroutine。
+
+	// 尝试从 P 的空闲 goroutine 队列中获取一个 goroutine
 	newg := gfget(pp)
+	// 如果没有找到空闲的 goroutine
 	if newg == nil {
+		// 分配一个新的 goroutine, stackMin=2048, 创建一个goroutine最小为2k
 		newg = malg(stackMin)
+		// 将状态从 _Gidle=尚未初始化 变更为 _Gdead=目前未使用
 		casgstatus(newg, _Gidle, _Gdead)
-		allgadd(newg) // publishes with a g->status of Gdead so GC scanner doesn't look at uninitialized stack.
+		// 将 newg 添加到所有 goroutine 的列表中
+		allgadd(newg)
 	}
+
+	// 如果 newg 没有栈，抛出错误
 	if newg.stack.hi == 0 {
 		throw("newproc1: newg missing stack")
 	}
-
+	// 如果 newg 的状态不是 _Gdead=目前未使用，抛出错误
 	if readgstatus(newg) != _Gdead {
 		throw("newproc1: new g is not Gdead")
 	}
 
-	totalSize := uintptr(4*goarch.PtrSize + sys.MinFrameSize) // extra space in case of reads slightly beyond frame
+	// 计算额外的空间大小
+	totalSize := uintptr(4*goarch.PtrSize + sys.MinFrameSize)
+	// 栈对齐
 	totalSize = alignUp(totalSize, sys.StackAlign)
+	// 计算栈指针位置
 	sp := newg.stack.hi - totalSize
 	spArg := sp
 	if usesLR {
-		// caller's LR
+		// 设置 caller's LR
 		*(*uintptr)(unsafe.Pointer(sp)) = 0
-		prepGoExitFrame(sp)
+		prepGoExitFrame(sp) // 准备退出帧
 		spArg += sys.MinFrameSize
 	}
 
+	// 清零调度信息，设置栈指针、PC 寄存器、指向自身 goroutine 的指针等
+
+	// 清零 newg 的调度信息
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
+	// 设置栈指针
 	newg.sched.sp = sp
+	// 设置栈顶指针
 	newg.stktopsp = sp
-	newg.sched.pc = abi.FuncPCABI0(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
+	// 设置 PC 寄存器
+	newg.sched.pc = abi.FuncPCABI0(goexit) + sys.PCQuantum
+	// 设置指向自身 goroutine 的指针
 	newg.sched.g = guintptr(unsafe.Pointer(newg))
+
+	// 准备调用 fn 函数, 使其看起来像执行了一次对 fn 的调用，然后在 fn 的第一条指令前停止。
 	gostartcallfn(&newg.sched, fn)
+
+	// 设置父 goroutine ID、创建时的 PC、祖先信息、起始 PC 等
+
+	// 设置父 goroutine 的 ID
 	newg.parentGoid = callergp.goid
+	// 设置创建时的 PC
 	newg.gopc = callerpc
+	// 保存祖先 goroutine 信息
 	newg.ancestors = saveAncestors(callergp)
+	// 设置起始 PC
 	newg.startpc = fn.fn
+
+	// 根据 goroutine 类型更新计数器，继承 pprof 标签，设置不需要被剖析的状态
 	if isSystemGoroutine(newg, false) {
 		sched.ngsys.Add(1)
 	} else {
-		// Only user goroutines inherit pprof labels.
 		if mp.curg != nil {
-			newg.labels = mp.curg.labels
+			newg.labels = mp.curg.labels // 只有用户goroutines继承ppprof标签。
 		}
 		if goroutineProfile.active {
-			// A concurrent goroutine profile is running. It should include
-			// exactly the set of goroutines that were alive when the goroutine
-			// profiler first stopped the world. That does not include newg, so
-			// mark it as not needing a profile before transitioning it from
-			// _Gdead.
+			// 设置 goroutine 不需要被剖析
 			newg.goroutineProfiled.Store(goroutineProfileSatisfied)
 		}
 	}
-	// Track initial transition?
+
+	// 跟踪初始状态？
 	newg.trackingSeq = uint8(fastrand())
 	if newg.trackingSeq%gTrackingPeriod == 0 {
 		newg.tracking = true
 	}
+
+	// 使用 CAS 设置 goroutine 的状态为 _Grunnable。
+	// 设置newg状态为_Grunnable, 到这里 newg 就可以运行了
 	casgstatus(newg, _Gdead, _Grunnable)
+	// 更新 GC 控制器的可扫描栈
 	gcController.addScannableStack(pp, int64(newg.stack.hi-newg.stack.lo))
 
+	// 从 P 的缓存中分配一个 goroutine ID
 	if pp.goidcache == pp.goidcacheend {
-		// Sched.goidgen is the last allocated id,
-		// this batch must be [sched.goidgen+1, sched.goidgen+GoidCacheBatch].
-		// At startup sched.goidgen=0, so main goroutine receives goid=1.
 		pp.goidcache = sched.goidgen.Add(_GoidCacheBatch)
 		pp.goidcache -= _GoidCacheBatch - 1
 		pp.goidcacheend = pp.goidcache + _GoidCacheBatch
 	}
 	newg.goid = pp.goidcache
 	pp.goidcache++
+
+	// 如果 race 检测器启用
 	if raceenabled {
 		newg.racectx = racegostart(callerpc)
 		newg.raceignore = 0
@@ -4572,11 +4653,14 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
 			racereleasemergeg(newg, unsafe.Pointer(&labelSync))
 		}
 	}
+
+	// 如果跟踪启用
 	if traceEnabled() {
 		traceGoCreate(newg, newg.startpc)
 	}
+	// 释放 M
 	releasem(mp)
-
+	// 返回新创建的 goroutine
 	return newg
 }
 
@@ -5167,56 +5251,67 @@ func (pp *p) destroy() {
 	pp.status = _Pdead
 }
 
-// Change number of processors.
+// 调整处理器数量。
 //
-// sched.lock must be held, and the world must be stopped.
+// 必须持有 sched.lock 锁，并且世界必须停止。
 //
-// gcworkbufs must not be being modified by either the GC or the write barrier
-// code, so the GC must not be running if the number of Ps actually changes.
+// gcworkbufs 必须不会被 GC 或写屏障代码修改，
+// 因此如果处理器数量实际上发生变化，GC 不应运行。
 //
-// Returns list of Ps with local work, they need to be scheduled by the caller.
+// 返回包含本地工作列表的 P 的列表，需要由调用者调度。
 func procresize(nprocs int32) *p {
-	assertLockHeld(&sched.lock)
-	assertWorldStopped()
+	assertLockHeld(&sched.lock) // 断言锁被持有
+	assertWorldStopped()        // 断言世界已停止
 
+	// 获取旧的处理器数量
 	old := gomaxprocs
+	// 如果参数无效，抛出错误
 	if old < 0 || nprocs <= 0 {
 		throw("procresize: invalid arg")
 	}
+	// 如果跟踪启用，记录新的处理器数量
 	if traceEnabled() {
 		traceGomaxprocs(nprocs)
 	}
 
-	// update statistics
+	// 更新统计处理器信息
+
+	// 获取当前时间
 	now := nanotime()
+	// 计算并更新总时间
 	if sched.procresizetime != 0 {
 		sched.totaltime += int64(old) * (now - sched.procresizetime)
 	}
+	// 更新上一次调整时间
 	sched.procresizetime = now
 
+	// 计算掩码单词数量
 	maskWords := (nprocs + 31) / 32
 
-	// Grow allp if necessary.
+	// 如果需要更多处理器，动态扩展 allp、idlepMask 和 timerpMask 列表。
 	if nprocs > int32(len(allp)) {
-		// Synchronize with retake, which could be running
-		// concurrently since it doesn't run on a P.
+		// 加锁，防止 retake 并发运行
 		lock(&allpLock)
+
+		// 切片至新大小
 		if nprocs <= int32(cap(allp)) {
 			allp = allp[:nprocs]
 		} else {
+			// 新建切片
 			nallp := make([]*p, nprocs)
-			// Copy everything up to allp's cap so we
-			// never lose old allocated Ps.
+			// 复制旧元素
 			copy(nallp, allp[:cap(allp)])
+			// 替换切片
 			allp = nallp
 		}
 
+		// 扩容 idlepMask 和 timerpMask
 		if maskWords <= int32(cap(idlepMask)) {
 			idlepMask = idlepMask[:maskWords]
 			timerpMask = timerpMask[:maskWords]
 		} else {
 			nidlepMask := make([]uint32, maskWords)
-			// No need to copy beyond len, old Ps are irrelevant.
+			// 不需要复制超出len，老Ps是无关紧要的。
 			copy(nidlepMask, idlepMask)
 			idlepMask = nidlepMask
 
@@ -5224,61 +5319,66 @@ func procresize(nprocs int32) *p {
 			copy(ntimerpMask, timerpMask)
 			timerpMask = ntimerpMask
 		}
+
+		// 解锁
 		unlock(&allpLock)
 	}
 
-	// initialize new P's
+	// 初始化新增加的处理器 P，设置其状态并存储。
 	for i := old; i < nprocs; i++ {
 		pp := allp[i]
 		if pp == nil {
+			// 创建新的 P 结构体
 			pp = new(p)
 		}
+
+		// 初始化 P
 		pp.init(i)
+		// 原子存储 P
 		atomicstorep(unsafe.Pointer(&allp[i]), unsafe.Pointer(pp))
 	}
 
+	// 根据需要，切换当前处理器至空闲状态或获取新的处理器。
+
+	// 获取当前 goroutine
 	gp := getg()
 	if gp.m.p != 0 && gp.m.p.ptr().id < nprocs {
-		// continue to use the current P
+		// 继续使用当前的 P
 		gp.m.p.ptr().status = _Prunning
 		gp.m.p.ptr().mcache.prepareForSweep()
 	} else {
-		// release the current P and acquire allp[0].
-		//
-		// We must do this before destroying our current P
-		// because p.destroy itself has write barriers, so we
-		// need to do that from a valid P.
+		// 释放当前 P 并获取 allp[0]
 		if gp.m.p != 0 {
 			if traceEnabled() {
-				// Pretend that we were descheduled
-				// and then scheduled again to keep
-				// the trace sane.
+				// 跟踪当前 P 的状态改变
 				traceGoSched()
 				traceProcStop(gp.m.p.ptr())
 			}
-			gp.m.p.ptr().m = 0
+			gp.m.p.ptr().m = 0 // 清除 M 引用
 		}
-		gp.m.p = 0
-		pp := allp[0]
-		pp.m = 0
-		pp.status = _Pidle
-		acquirep(pp)
+
+		gp.m.p = 0         // 清除 P 引用
+		pp := allp[0]      // 获取第一个 P
+		pp.m = 0           // 清除 M 引用
+		pp.status = _Pidle // 设置 P 状态为空闲
+		acquirep(pp)       // 把allp[0]和m0关联起来
+
+		// 开始跟踪
 		if traceEnabled() {
 			traceGoStart()
 		}
 	}
 
-	// g.m.p is now set, so we no longer need mcache0 for bootstrapping.
+	// g.m.p 现在设置，所以我们不再需要 mcache0 进行引导。
 	mcache0 = nil
 
-	// release resources from unused P's
+	// 销毁不再需要的处理器 P 的资源。
 	for i := nprocs; i < old; i++ {
 		pp := allp[i]
-		pp.destroy()
-		// can't free P itself because it can be referenced by an M in syscall
+		pp.destroy() // 销毁 P
 	}
 
-	// Trim allp.
+	// 根据新的处理器数量，裁剪 allp、idlepMask 和 timerpMask 列表。
 	if int32(len(allp)) != nprocs {
 		lock(&allpLock)
 		allp = allp[:nprocs]
@@ -5287,28 +5387,46 @@ func procresize(nprocs int32) *p {
 		unlock(&allpLock)
 	}
 
+	// 根据 P 的状态将其放入空闲队列或可运行队列。
+
+	// 初始化可运行 P 的指针
 	var runnablePs *p
 	for i := nprocs - 1; i >= 0; i-- {
 		pp := allp[i]
+		// 如果是当前 P，跳过
 		if gp.m.p.ptr() == pp {
 			continue
 		}
+
+		// 设置 P 状态为空闲
 		pp.status = _Pidle
 		if runqempty(pp) {
+			// 将 P 放入空闲队列
 			pidleput(pp, now)
 		} else {
+			// 获取 M
 			pp.m.set(mget())
+			// 链接可运行 P
 			pp.link.set(runnablePs)
+			// 更新可运行 P 的指针
 			runnablePs = pp
 		}
 	}
+
+	// 原子更新全局处理器数量，并通知 GC 限速器。
+
+	// 重置窃取顺序
 	stealOrder.reset(uint32(nprocs))
-	var int32p *int32 = &gomaxprocs // make compiler check that gomaxprocs is an int32
+	// 指向 gomaxprocs 的指针
+	var int32p *int32 = &gomaxprocs
+	// 原子更新 gomaxprocs
 	atomic.Store((*uint32)(unsafe.Pointer(int32p)), uint32(nprocs))
+	// 通知限速器处理器数量的变化
 	if old != nprocs {
-		// Notify the limiter that the amount of procs has changed.
 		gcCPULimiter.resetCapacity(now, nprocs)
 	}
+
+	// 返回那些具有本地工作队列的处理器，它们需要被调度。
 	return runnablePs
 }
 
@@ -6186,41 +6304,66 @@ func runqempty(pp *p) bool {
 // assumptions.
 const randomizeScheduler = raceenabled
 
-// runqput tries to put g on the local runnable queue.
-// If next is false, runqput adds g to the tail of the runnable queue.
-// If next is true, runqput puts g in the pp.runnext slot.
-// If the run queue is full, runnext puts g on the global queue.
-// Executed only by the owner P.
+// 尝试将 goroutine gp 放入本地可运行队列。
+// 如果 next 为 false (不竞争)，则将 gp 添加到可运行队列的尾部。
+// 如果 next 为 true (立即竞争)，则将 gp 放入 pp.runnext 槽。
+// 如果本地队列满了，runqput 将 gp 放到全局队列上。
+// 仅由拥有 P 的线程执行。
 func runqput(pp *p, gp *g, next bool) {
+	// 如果启用了调度器随机化，且 next 为 true，且随机数生成器生成的数字为 0，
+	// 则将 next 设置为 false。这是为了增加调度的随机性。
 	if randomizeScheduler && next && fastrandn(2) == 0 {
 		next = false
 	}
 
 	if next {
-	retryNext:
+	retryNext: // 重试标签
+		// 获取当前的 runnext 指针。指向下一个应该运行的 goroutine 的指针，用于优化通信和等待模式的调度
 		oldnext := pp.runnext
+		// 使用 compare-and-swap (CAS) 操作尝试将 gp 设置为新的 runnext。
 		if !pp.runnext.cas(oldnext, guintptr(unsafe.Pointer(gp))) {
+			// 如果 CAS 失败，意味着另一个 goroutine 同时也在尝试修改 runnext，
+			// 因此需要重新尝试直到成功。
 			goto retryNext
 		}
+
+		// 检查旧的 runnext 是否为零。
 		if oldnext == 0 {
+			// 如果旧的 runnext 为零，这意味着我们是第一个设置 runnext 的，
+			// 所以我们可以直接返回。
 			return
 		}
-		// Kick the old runnext out to the regular run queue.
+
+		// 注意，这里我们将 gp 的指针设置为旧的 runnext 的值，以便在下一次循环中将其添加到队列。
+		// 将原来的 runnext 踢出到常规可运行队列。
 		gp = oldnext.ptr()
 	}
 
-retry:
-	h := atomic.LoadAcq(&pp.runqhead) // load-acquire, synchronize with consumers
+retry: // 重试标签
+	// 加载头部，使用 load-acquire 原子操作来读取 runqhead，
+	// 这样可以保证从其他处理器看到的值是最新的。
+	h := atomic.LoadAcq(&pp.runqhead)
 	t := pp.runqtail
+	// 检查队列是否已满，通过比较尾部与头部之间的距离是否小于队列的长度。
 	if t-h < uint32(len(pp.runq)) {
+		// 计算队列中下一个可用槽的位置。
+		// 将 gp 设置到队列的下一个可用位置。
 		pp.runq[t%uint32(len(pp.runq))].set(gp)
-		atomic.StoreRel(&pp.runqtail, t+1) // store-release, makes the item available for consumption
+		// 更新队列的尾部指针，使用 store-release 原子操作来写入 runqtail，
+		// 这样可以保证其他处理器能够看到最新的尾部指针。
+		atomic.StoreRel(&pp.runqtail, t+1)
+		// 成功添加后，返回。
 		return
 	}
+
+	// 当队列满了时，调用 runqputslow 来处理，这通常会将 gp 移动到全局可运行队列。
 	if runqputslow(pp, gp, h, t) {
 		return
 	}
-	// the queue is not full, now the put above must succeed
+
+	// 如果 runqputslow 没有处理 gp 或者队列实际上并不满，
+	// 则继续尝试将 gp 添加到队列中。
+	// 使用 goto 语句跳回 retry 标签处，重新加载头部并检查队列的状态。
 	goto retry
 }
 

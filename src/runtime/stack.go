@@ -71,7 +71,7 @@ const (
 	// and iOS because they do not use a separate stack.
 	stackSystem = goos.IsWindows*512*goarch.PtrSize + goos.IsPlan9*512 + goos.IsIos*goarch.IsArm64*1024
 
-	// The minimum size of stack used by Go code
+	// Go代码使用的最小堆栈大小
 	stackMin = 2048
 
 	// The minimum stack size to allocate.
@@ -1126,15 +1126,21 @@ func nilfunc() {
 	*(*uint8)(nil) = 0
 }
 
-// adjust Gobuf as if it executed a call to fn
-// and then stopped before the first instruction in fn.
+// 调整 gobuf（goroutine 的缓冲区），使其看起来像执行了一次对 fn 的调用，
+// 然后在 fn 的第一条指令前停止。
 func gostartcallfn(gobuf *gobuf, fv *funcval) {
 	var fn unsafe.Pointer
 	if fv != nil {
+		// 如果 funcval 不为 nil，则获取函数的地址。
 		fn = unsafe.Pointer(fv.fn)
 	} else {
+		// 如果 funcval 为 nil，则使用 nilfunc 的地址，这是一个特殊的空函数。
 		fn = unsafe.Pointer(abi.FuncPCABIInternal(nilfunc))
 	}
+
+	// 使用调整后的函数地址和 funcval 的指针来准备 gobuf。
+	// 传入调整后的 fn 地址以及 fv 的指针。
+	// gostartcall 会根据提供的信息来准备 goroutine 的调用栈，使其看起来像是刚刚执行了一次函数调用。
 	gostartcall(gobuf, fn, unsafe.Pointer(fv))
 }
 
