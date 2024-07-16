@@ -883,32 +883,35 @@ func semacreate(mp *m) {
 	}
 }
 
-// May run with m.p==nil, so write barriers are not allowed. This
-// function is called by newosproc0, so it is also required to
-// operate without stack guards.
+// 在可能 m.p==nil 的情况下运行，因此不允许写屏障。
+// 此函数由 newosproc0 调用，因此也需要在没有栈保护的情况下运行。
 //
 //go:nowritebarrierrec
 //go:nosplit
 func newosproc(mp *m) {
-	// We pass 0 for the stack size to use the default for this binary.
+	// 我们传递 0 作为栈大小来使用此二进制文件的默认值。
+	// 使用 stdcall6 调用 CreateThread 函数，参数如下：
+	// 第一个参数是线程优先级，我们传入 0 使用默认值；
+	// 第二个参数是栈大小，我们传入 0 使用默认值；
+	// 第三个参数是线程的入口函数地址，我们传入 tstart_stdcall；
+	// 第四个参数是线程参数，我们传入 mp 的地址；
+	// 第五个和第六个参数保留，通常设为 0。
 	thandle := stdcall6(_CreateThread, 0, 0,
 		abi.FuncPCABI0(tstart_stdcall), uintptr(unsafe.Pointer(mp)),
 		0, 0)
 
 	if thandle == 0 {
 		if atomic.Load(&exiting) != 0 {
-			// CreateThread may fail if called
-			// concurrently with ExitProcess. If this
-			// happens, just freeze this thread and let
-			// the process exit. See issue #18253.
+			// 如果与 ExitProcess 并发调用，可能导致 CreateThread 失败。如果发生这种情况，只需冻结此线程，让进程退出。
+			// 见问题 #18253。
 			lock(&deadlock)
 			lock(&deadlock)
 		}
-		print("runtime: failed to create new OS thread (have ", mcount(), " already; errno=", getlasterror(), ")\n")
+		print("runtime: 创建新的 OS 线程失败（已有 ", mcount(), " 个线程; errno=", getlasterror(), "）\n")
 		throw("runtime.newosproc")
 	}
 
-	// Close thandle to avoid leaking the thread object if it exits.
+	// 如果该线程退出, 关闭 thandle 以避免线程对象泄漏。
 	stdcall1(_CloseHandle, thandle)
 }
 
@@ -953,55 +956,73 @@ func clearSignalHandlers() {
 func sigblock(exiting bool) {
 }
 
-// Called to initialize a new m (including the bootstrap m).
-// Called on the new thread, cannot allocate memory.
+// 被调用来初始化一个新的 M 线程（包括引导 M）,在新线程上调用，不能分配内存。
+// 函数确保了新创建的 M 有正确的线程句柄、进程 ID、高分辨率定时器（如果可用），以及设置了正确的栈边界，这些都是初始化 M 和其 g0 必需的。
+//
+// 1.复制线程句柄：使用 _DuplicateHandle 函数复制当前线程的句柄到 thandle。
+// 2.锁定 M 的 threadLock：防止多个线程同时修改 M 的状态。
+// 3.设置 M 的线程句柄和进程 ID：将复制的线程句柄赋给 M，并获取当前线程的 ID。
+// 4.配置 usleep 定时器：如果 M 没有高分辨率定时器并且系统支持，创建一个高分辨率定时器。
+// 5.解锁 threadLock：完成对 M 的修改后解锁。
+// 6.查询栈基址：使用 _VirtualQuery 函数从操作系统获取当前栈的基址信息。
+// 7.设置栈边界：基于获取到的栈基址和大小，设置栈底地址和栈保护区域，确保栈使用的安全性。
+// 8.检查栈和 SP：验证栈和栈指针（SP）的有效性，确保它们不会超出预设的边界。
 func minit() {
 	var thandle uintptr
+	// 复制当前线程句柄到 thandle。
 	if stdcall7(_DuplicateHandle, currentProcess, currentThread, currentProcess, uintptr(unsafe.Pointer(&thandle)), 0, 0, _DUPLICATE_SAME_ACCESS) == 0 {
 		print("runtime.minit: duplicatehandle failed; errno=", getlasterror(), "\n")
 		throw("runtime.minit: duplicatehandle failed")
 	}
 
+	// 获取当前 g 的 M。
 	mp := getg().m
+	// 锁定 M 的 threadLock。
 	lock(&mp.threadLock)
+	// 设置 M 的线程句柄。
 	mp.thread = thandle
+	// 设置 M 的进程 ID。
 	mp.procid = uint64(stdcall0(_GetCurrentThreadId))
 
-	// Configure usleep timer, if possible.
+	// 配置 usleep 定时器，如果可能的话。
 	if mp.highResTimer == 0 && haveHighResTimer {
+		// 创建高分辨率定时器。
 		mp.highResTimer = createHighResTimer()
 		if mp.highResTimer == 0 {
 			print("runtime: CreateWaitableTimerEx failed; errno=", getlasterror(), "\n")
 			throw("CreateWaitableTimerEx when creating timer failed")
 		}
 	}
+
+	// 解锁 M 的 threadLock。
 	unlock(&mp.threadLock)
 
-	// Query the true stack base from the OS. Currently we're
-	// running on a small assumed stack.
+	// 从操作系统查询真实的栈基址。目前我们正在一个小的假设栈上运行。
+
+	// 定义内存基本信息结构体。
 	var mbi memoryBasicInformation
 	res := stdcall3(_VirtualQuery, uintptr(unsafe.Pointer(&mbi)), uintptr(unsafe.Pointer(&mbi)), unsafe.Sizeof(mbi))
 	if res == 0 {
 		print("runtime: VirtualQuery failed; errno=", getlasterror(), "\n")
 		throw("VirtualQuery for stack base failed")
 	}
-	// The system leaves an 8K PAGE_GUARD region at the bottom of
-	// the stack (in theory VirtualQuery isn't supposed to include
-	// that, but it does). Add an additional 8K of slop for
-	// calling C functions that don't have stack checks and for
-	// lastcontinuehandler. We shouldn't be anywhere near this
-	// bound anyway.
+	// 系统在栈底部留下一个 8K PAGE_GUARD 区域（理论上 VirtualQuery 不应该包含这个，但它确实包含）。
+	// 添加额外的 8K 用于调用没有栈检查的 C 函数和 lastcontinuehandler。无论如何我们都不应该接近这个界限。
+	// 计算栈基址。
 	base := mbi.allocationBase + 16<<10
-	// Sanity check the stack bounds.
+	// 检查栈边界的有效性。
 	g0 := getg()
 	if base > g0.stack.hi || g0.stack.hi-base > 64<<20 {
 		print("runtime: g0 stack [", hex(base), ",", hex(g0.stack.hi), ")\n")
 		throw("bad g0 stack")
 	}
+	// 设置栈底地址。
 	g0.stack.lo = base
+	// 设置第一个栈保护区域。
 	g0.stackguard0 = g0.stack.lo + stackGuard
+	// 设置第二个栈保护区域。
 	g0.stackguard1 = g0.stackguard0
-	// Sanity check the SP.
+	// 检查 SP 的有效性。
 	stackcheck()
 }
 
@@ -1071,13 +1092,16 @@ func stdcall0(fn stdFunction) uintptr {
 	return stdcall(fn)
 }
 
+// stdcall1 用于调用 stdcall 调用约定的 C 函数，但仅支持一个参数。
+// fn 参数是一个指向 C 函数的指针，a0 是传递给该函数的唯一参数。
+//
 //go:nosplit
 //go:cgo_unsafe_args
 func stdcall1(fn stdFunction, a0 uintptr) uintptr {
-	mp := getg().m
-	mp.libcall.n = 1
-	mp.libcall.args = uintptr(noescape(unsafe.Pointer(&a0)))
-	return stdcall(fn)
+	mp := getg().m                                           // 获取当前 goroutine 关联的执行上下文 m
+	mp.libcall.n = 1                                         // 设置 libcall 的参数数量为 1
+	mp.libcall.args = uintptr(noescape(unsafe.Pointer(&a0))) // 将参数 a0 的地址设置为 libcall 的参数
+	return stdcall(fn)                                       // 调用 stdcall 函数并返回结果
 }
 
 //go:nosplit
@@ -1154,18 +1178,23 @@ func usleep_no_g(us uint32) {
 	usleep2(dt)
 }
 
-//go:nosplit
+// 以微秒为单位的睡眠函数，实现功能为程序在指定的微秒时间内进入睡眠状态。
+//
+//go:nosplit 表示不进行栈分割，以便在系统栈上执行该函数。
 func usleep(us uint32) {
-	systemstack(func() {
-		dt := -10 * int64(us) // relative sleep (negative), 100ns units
-		// If the high-res timer is available and its handle has been allocated for this m, use it.
-		// Otherwise fall back to the low-res one, which doesn't need a handle.
+	systemstack(func() { // 在系统栈上执行以下函数。
+
+		// 计算相对睡眠时间（负数），单位为100纳秒。
+		dt := -10 * int64(us)
+
+		// 如果高分辨率定时器可用，并且为当前 M 分配了其句柄，请使用高分辨率定时器。
+		// 否则，退回到低分辨率定时器，低分辨率定时器不需要句柄。
 		if haveHighResTimer && getg().m.highResTimer != 0 {
 			h := getg().m.highResTimer
-			stdcall6(_SetWaitableTimer, h, uintptr(unsafe.Pointer(&dt)), 0, 0, 0, 0)
-			stdcall3(_NtWaitForSingleObject, h, 0, 0)
+			stdcall6(_SetWaitableTimer, h, uintptr(unsafe.Pointer(&dt)), 0, 0, 0, 0) // 设置高分辨率定时器。
+			stdcall3(_NtWaitForSingleObject, h, 0, 0)                                // 等待定时器到期唤醒。
 		} else {
-			usleep2(int32(dt))
+			usleep2(int32(dt)) // 使用低分辨率定时器进行睡眠。
 		}
 	})
 }
@@ -1303,122 +1332,138 @@ const preemptMSupported = true
 // suspending each other.
 var suspendLock mutex
 
+// 函数请求操作系统暂停并抢占指定的 M，以便实现 Goroutine 的抢占式调度。
 func preemptM(mp *m) {
+	// 防止自我抢占。
 	if mp == getg().m {
 		throw("self-preempt")
 	}
 
-	// Synchronize with external code that may try to ExitProcess.
+	// 同步外部代码，可能尝试 ExitProcess。
 	if !atomic.Cas(&mp.preemptExtLock, 0, 1) {
-		// External code is running. Fail the preemption
-		// attempt.
+		// 外部代码正在运行。抢占尝试失败。
 		mp.preemptGen.Add(1)
 		return
 	}
 
-	// Acquire our own handle to mp's thread.
 	lock(&mp.threadLock)
+
+	// 获取对 mp 的线程的引用。
 	if mp.thread == 0 {
-		// The M hasn't been minit'd yet (or was just unminit'd).
+		// M 尚未初始化或刚刚被反初始化。
 		unlock(&mp.threadLock)
 		atomic.Store(&mp.preemptExtLock, 0)
 		mp.preemptGen.Add(1)
 		return
 	}
+
+	// 创建线程的句柄以及进行线程上下文的准备
+	// （这一部分包括挂起线程、获取线程上下文、注入异步抢占点）
+	// 详细的实现细节涉及到不同的 CPU 架构处理，如 x86、amd64、arm 和 arm64。
+
 	var thread uintptr
 	if stdcall7(_DuplicateHandle, currentProcess, mp.thread, currentProcess, uintptr(unsafe.Pointer(&thread)), 0, 0, _DUPLICATE_SAME_ACCESS) == 0 {
 		print("runtime.preemptM: duplicatehandle failed; errno=", getlasterror(), "\n")
 		throw("runtime.preemptM: duplicatehandle failed")
 	}
+
 	unlock(&mp.threadLock)
 
-	// Prepare thread context buffer. This must be aligned to 16 bytes.
+	// 准备线程上下文缓冲区。必须对齐至 16 字节。
 	var c *context
 	var cbuf [unsafe.Sizeof(*c) + 15]byte
 	c = (*context)(unsafe.Pointer((uintptr(unsafe.Pointer(&cbuf[15]))) &^ 15))
 	c.contextflags = _CONTEXT_CONTROL
 
-	// Serialize thread suspension. SuspendThread is asynchronous,
-	// so it's otherwise possible for two threads to suspend each
-	// other and deadlock. We must hold this lock until after
-	// GetThreadContext, since that blocks until the thread is
-	// actually suspended.
 	lock(&suspendLock)
 
-	// Suspend the thread.
+	// 序列化线程挂起。SuspendThread 是异步的，可能两个线程相互挂起并死锁。
+	// 必须持有此锁直到 GetThreadContext 后，因为该函数会阻塞直到线程实际挂起。
+
+	// 异步挂起线程。
 	if int32(stdcall1(_SuspendThread, thread)) == -1 {
 		unlock(&suspendLock)
 		stdcall1(_CloseHandle, thread)
 		atomic.Store(&mp.preemptExtLock, 0)
-		// The thread no longer exists. This shouldn't be
-		// possible, but just acknowledge the request.
+		// 线程不再存在。虽然不应该发生，但确认请求。
 		mp.preemptGen.Add(1)
 		return
 	}
 
-	// We have to be very careful between this point and once
-	// we've shown mp is at an async safe-point. This is like a
-	// signal handler in the sense that mp could have been doing
-	// anything when we stopped it, including holding arbitrary
-	// locks.
+	// 我们必须非常小心，在这一点和显示 mp 处于异步安全点之间。
+	// 类似信号处理器，mp 可以在我们停止它时做任何事情，包括持有任意锁。
 
-	// We have to get the thread context before inspecting the M
-	// because SuspendThread only requests a suspend.
-	// GetThreadContext actually blocks until it's suspended.
+	// 必须在检查 M 之前获取线程上下文，因为 SuspendThread 只请求挂起。
+	// GetThreadContext 实际上会阻塞直到线程被挂起。
+	// 1. 获取线程的寄存器值：可以获得线程在被挂起时各寄存器的当前值，如栈指针、指令指针等。
+	// 2. 获取线程的运行状态：可以获知线程被挂起时处于的具体状态，有助于后续对线程的调度和操作。
+	// 3. 为后续操作提供正确的上下文信息：获取线程上下文后，可以根据实际情况进行后续的处理，如根据上下文信息进行异步抢占点的注入等操作。
 	stdcall2(_GetThreadContext, thread, uintptr(unsafe.Pointer(c)))
 
 	unlock(&suspendLock)
 
-	// Does it want a preemption and is it safe to preempt?
+	// 它是否想要抢占并且安全抢占？
 	gp := gFromSP(mp, c.sp())
 	if gp != nil && wantAsyncPreempt(gp) {
 		if ok, newpc := isAsyncSafePoint(gp, c.ip(), c.sp(), c.lr()); ok {
-			// Inject call to asyncPreempt
+			// 进行异步抢占点的注入
+			// 注入调用 asyncPreempt
 			targetPC := abi.FuncPCABI0(asyncPreempt)
 			switch GOARCH {
 			default:
 				throw("unsupported architecture")
 			case "386", "amd64":
-				// Make it look like the thread called targetPC.
+				// 获取当前栈指针的位置，然后向栈指针减去 goarch.PtrSize，以便为注入的数据腾出空间
 				sp := c.sp()
 				sp -= goarch.PtrSize
+
+				// 将新的目标 PC 程序计数器地址 newpc 写入到栈指针指向的位置，这样在执行返回指令时会跳转到异步抢占函数，实现抢占点的触发
 				*(*uintptr)(unsafe.Pointer(sp)) = newpc
+
+				// 更新上下文中的栈指针和指令指针为注入异步抢占点后的新值，以便后续的上下文设置能够正确执行。
 				c.set_sp(sp)
 				c.set_ip(targetPC)
 
 			case "arm":
-				// Push LR. The injected call is responsible
-				// for restoring LR. gentraceback is aware of
-				// this extra slot. See sigctxt.pushCall in
-				// signal_arm.go, which is similar except we
-				// subtract 1 from IP here.
+				// 获取当前栈指针的位置，然后向栈指针减去 goarch.PtrSize，以便为注入的数据腾出空间
 				sp := c.sp()
 				sp -= goarch.PtrSize
+
+				// 更新线程上下文的栈指针为调整后的新值，确保后续操作在正确的栈位置进行
 				c.set_sp(sp)
+				// 将当前的 Link Register（LR）的值写入到栈指针指向的位置，保存当前的返回地址
 				*(*uint32)(unsafe.Pointer(sp)) = uint32(c.lr())
+
+				// LR 指向了异步抢占函数的地址，IP 指向了异步抢占点的目标地址，确保在恢复线程执行时能够正确跳转到异步抢占函数
 				c.set_lr(newpc - 1)
 				c.set_ip(targetPC)
 
 			case "arm64":
-				// Push LR. The injected call is responsible
-				// for restoring LR. gentraceback is aware of
-				// this extra slot. See sigctxt.pushCall in
-				// signal_arm64.go.
-				sp := c.sp() - 16 // SP needs 16-byte alignment
+				// 获取当前栈指针的位置，然后向栈指针减去 goarch.PtrSize，以便为注入的数据腾出空间
+				sp := c.sp() - 16 // SP 需要 16 字节对齐
+
+				// 更新线程上下文的栈指针为调整后的新值，确保后续操作在正确的栈位置进行
 				c.set_sp(sp)
+				// 将当前的 Link Register（LR）的值写入到栈指针指向的位置，保存当前的返回地址
 				*(*uint64)(unsafe.Pointer(sp)) = uint64(c.lr())
+
+				// LR 指向了异步抢占函数的地址，IP 指向了异步抢占点的目标地址，确保在恢复线程执行时能够正确跳转到异步抢占函数
 				c.set_lr(newpc)
 				c.set_ip(targetPC)
 			}
+
+			// 将修改后的上下文设置回线程，以实现 Goroutine 的暂停并转移
 			stdcall2(_SetThreadContext, thread, uintptr(unsafe.Pointer(c)))
 		}
 	}
 
+	// 清除 mp.preemptExtLock，表明抢占已完成。
 	atomic.Store(&mp.preemptExtLock, 0)
 
-	// Acknowledge the preemption.
+	// 确认抢占。
 	mp.preemptGen.Add(1)
 
+	// 恢复线程并关闭句柄
 	stdcall1(_ResumeThread, thread)
 	stdcall1(_CloseHandle, thread)
 }

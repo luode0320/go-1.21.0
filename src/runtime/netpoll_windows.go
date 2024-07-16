@@ -79,65 +79,86 @@ func netpollBreak() {
 	}
 }
 
-// netpoll checks for ready network connections.
-// Returns list of goroutines that become runnable.
-// delay < 0: blocks indefinitely
-// delay == 0: does not block, just polls
-// delay > 0: block for up to that many nanoseconds
+// 函数用于检查就绪的网络连接。运行时网络 I/O 的关键部分，
+// 它利用平台的 IO 完成端口机制来高效地检测就绪的网络连接，并准备好相应的 goroutine 进行后续的网络操作
+// 返回一个 goroutine 列表，表示这些 goroutine 的网络阻塞已经停止, 可以开始调度运行。
+// delay 参数：
+//
+//	< 0: 无限期阻塞
+//	== 0: 不阻塞，只进行轮询
+//	> 0: 最多阻塞指定的纳秒数
 func netpoll(delay int64) gList {
-	var entries [64]overlappedEntry
-	var wait, qty, flags, n, i uint32
-	var errno int32
-	var op *net_op
-	var toRun gList
+	var entries [64]overlappedEntry   // 初始化一个 overlappedEntry 数组用于存储 IO 完成端口的完成包。
+	var wait, qty, flags, n, i uint32 // 初始化多个 uint32 变量用于存储各种计数和标志。
+	var errno int32                   // 存储错误号。
+	var op *net_op                    // 指向 net_op 结构体的指针。
+	var toRun gList                   // 初始化一个 goroutine 列表。
 
+	// 获取当前 goroutine 所在的 m 结构体。
 	mp := getg().m
 
+	// 如果 IO 完成端口未初始化，直接返回空列表。
 	if iocphandle == _INVALID_HANDLE_VALUE {
 		return gList{}
 	}
+
+	// 根据 delay 参数计算等待时间。
 	if delay < 0 {
-		wait = _INFINITE
+		wait = _INFINITE // 无限期等待。
 	} else if delay == 0 {
-		wait = 0
+		wait = 0 // 不等待，立即返回。
 	} else if delay < 1e6 {
-		wait = 1
+		wait = 1 // 小于 1 毫秒的延迟视为 1 毫秒。
 	} else if delay < 1e15 {
-		wait = uint32(delay / 1e6)
+		wait = uint32(delay / 1e6) // 超过 1 毫秒但小于 1e15 纳秒的延迟转换为毫秒。
 	} else {
-		// An arbitrary cap on how long to wait for a timer.
-		// 1e9 ms == ~11.5 days.
+		// 任意上限，限制等待时间，1e9 毫秒大约等于 11.5 天。
 		wait = 1e9
 	}
 
+	// 计算要查询的条目数量，至少为 8，最多为 entries 数组长度除以 gomaxprocs。
 	n = uint32(len(entries) / int(gomaxprocs))
 	if n < 8 {
 		n = 8
 	}
+
+	// 如果延迟不为 0，标记当前 m 结构体为阻塞状态。
 	if delay != 0 {
 		mp.blocked = true
 	}
+
+	// 调用 GetQueuedCompletionStatusEx 函数等待完成包 n。
 	if stdcall6(_GetQueuedCompletionStatusEx, iocphandle, uintptr(unsafe.Pointer(&entries[0])), uintptr(n), uintptr(unsafe.Pointer(&n)), uintptr(wait), 0) == 0 {
-		mp.blocked = false
-		errno = int32(getlasterror())
-		if errno == _WAIT_TIMEOUT {
+		mp.blocked = false            // 清除阻塞状态。
+		errno = int32(getlasterror()) // 获取最后的错误码。
+		if errno == _WAIT_TIMEOUT {   // 如果超时，则返回空列表。
 			return gList{}
 		}
 		println("runtime: GetQueuedCompletionStatusEx failed (errno=", errno, ")")
-		throw("runtime: netpoll failed")
+		throw("runtime: netpoll failed") // 其他错误，抛出异常。
 	}
+
+	// 清除阻塞状态。
 	mp.blocked = false
+
+	// 处理每个完成包。
 	for i = 0; i < n; i++ {
+		// 获取操作指针。
 		op = entries[i].op
+		// 如果操作有效且关联的 pd 与完成包的 key 匹配。
 		if op != nil && op.pd == entries[i].key {
 			errno = 0
 			qty = 0
+			// 调用 WSAGetOverlappedResult 函数获取重叠操作的状态。
 			if stdcall5(_WSAGetOverlappedResult, op.pd.fd, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(&qty)), 0, uintptr(unsafe.Pointer(&flags))) == 0 {
-				errno = int32(getlasterror())
+				errno = int32(getlasterror()) // 获取最后的错误码。
 			}
+			// 处理完成的操作，更新可运行的 goroutine 列表。
 			handlecompletion(&toRun, op, errno, qty)
 		} else {
+			// 如果完成包无效，清除 netpollWakeSig。
 			netpollWakeSig.Store(0)
+			// 如果延迟为 0，将通知转发给阻塞的轮询器。
 			if delay == 0 {
 				// Forward the notification to the
 				// blocked poller.
@@ -145,6 +166,8 @@ func netpoll(delay int64) gList {
 			}
 		}
 	}
+
+	// 返回可运行的 goroutine 列表。
 	return toRun
 }
 

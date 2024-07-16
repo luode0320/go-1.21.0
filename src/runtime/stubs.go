@@ -113,6 +113,9 @@ func reflect_memmove(to, from unsafe.Pointer, n uintptr) {
 // exported value for testing
 const hashLoad = float32(loadFactorNum) / float32(loadFactorDen)
 
+// 伪随机数生成函数 fastrand
+//
+//go:nosplit 表示这个函数不会触发调度器的栈分裂，这能够保证在函数执行期间不会被 Go 调度器中断
 //go:nosplit
 func fastrand() uint32 {
 	mp := getg().m

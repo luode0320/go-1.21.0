@@ -139,25 +139,32 @@ func noteclear(n *note) {
 	}
 }
 
+// 函数唤醒等待在 note 上的一个线程。
+// 注意：如果一个线程已经处于唤醒状态，再次调用 notewakeup 是不允许的，这会导致错误。
 func notewakeup(n *note) {
 	var v uintptr
 	for {
+		// 加载 note 的 key 字段的值。
 		v = atomic.Loaduintptr(&n.key)
+
+		// 尝试原子地将 note 的 key 设置为 locked。
+		// 这是为了确保只有一个线程能够唤醒等待线程。
 		if atomic.Casuintptr(&n.key, v, locked) {
 			break
 		}
 	}
 
-	// Successfully set waitm to locked.
-	// What was it before?
+	// 成功将 waitm 设置为 locked。
+	// 在设置之前，key 的值是什么？
 	switch {
 	case v == 0:
-		// Nothing was waiting. Done.
+		// 没有线程在等待。完成。
 	case v == locked:
-		// Two notewakeups! Not allowed.
+		// 两次 notewakeup！不允许。
 		throw("notewakeup - double wakeup")
 	default:
-		// Must be the waiting m. Wake it up.
+		// 必须是等待的 m。唤醒它。
+		// v 中保存的是等待线程的地址。
 		semawakeup((*m)(unsafe.Pointer(v)))
 	}
 }

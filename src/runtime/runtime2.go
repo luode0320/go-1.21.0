@@ -699,6 +699,9 @@ type schedt struct {
 	needspinning atomic.Uint32 // 需要查找工作的标志，布尔值。必须持有 sched.lock 才能设置为 1。
 
 	// 全局可运行队列和其大小，用于存储准备运行的 goroutine。
+	// 1.Goroutine 主动让出执行权，例如调用 runtime.Gosched() 方法；
+	// 2.Goroutine 执行的时间片用完，会被放入全局队列以便重新调度；
+	// 3.某些系统调用（比如阻塞的网络操作）会导致 Goroutine暂时进入全局队列。
 	runq     gQueue // 全局可运行队列。
 	runqsize int32  // 全局可运行队列的大小。
 
