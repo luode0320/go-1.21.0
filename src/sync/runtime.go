@@ -13,25 +13,19 @@ import "unsafe"
 // library and should not be used directly.
 func runtime_Semacquire(s *uint32)
 
-// Semacquire(RW)Mutex(R) is like Semacquire, but for profiling contended
-// Mutexes and RWMutexes.
-// If lifo is true, queue waiter at the head of wait queue.
-// skipframes is the number of frames to omit during tracing, counting from
-// runtime_SemacquireMutex's caller.
-// The different forms of this function just tell the runtime how to present
-// the reason for waiting in a backtrace, and is used to compute some metrics.
-// Otherwise they're functionally identical.
+// runtime_SemacquireMutex(RW) 与 Semacquire 类似，但用于对竞争的 Mutex 和 RWMutex 进行性能分析。
+// 如果 lifo 为 true，则将等待者排在等待队列的头部。
+// skipframes 表示在跟踪时要省略的帧数，从 runtime_SemacquireMutex 的调用者开始计算。
+// 这个函数的不同形式仅告诉运行时如何在回溯中呈现等待的原因，并用于计算一些指标。
+// 否则，它们在功能上是相同的。
 func runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int)
 func runtime_SemacquireRWMutexR(s *uint32, lifo bool, skipframes int)
 func runtime_SemacquireRWMutex(s *uint32, lifo bool, skipframes int)
 
-// Semrelease atomically increments *s and notifies a waiting goroutine
-// if one is blocked in Semacquire.
-// It is intended as a simple wakeup primitive for use by the synchronization
-// library and should not be used directly.
-// If handoff is true, pass count directly to the first waiter.
-// skipframes is the number of frames to omit during tracing, counting from
-// runtime_Semrelease's caller.
+// 原子性地递增 *s，并且如果有 Goroutine 在 Semacquire 中被阻塞，通知它
+// 这是一个简单的唤醒原语，供同步库使用，不应直接使用
+// 如果 handoff 为 true，则直接将计数传递给第一个等待者
+// skipframes 表示跟踪时要省略的帧数，从 runtime_Semrelease 的调用者开始计数
 func runtime_Semrelease(s *uint32, handoff bool, skipframes int)
 
 // See runtime/sema.go for documentation.
@@ -53,11 +47,11 @@ func init() {
 	runtime_notifyListCheck(unsafe.Sizeof(n))
 }
 
-// Active spinning runtime support.
-// runtime_canSpin reports whether spinning makes sense at the moment.
+// 主动旋转运行时支持。
+// runtime_canSpin 报告目前旋转是否有意义。
 func runtime_canSpin(i int) bool
 
-// runtime_doSpin does active spinning.
+// 自旋。
 func runtime_doSpin()
 
 func runtime_nanotime() int64

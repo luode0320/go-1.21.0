@@ -87,8 +87,8 @@ func SwapUintptr(addr *uintptr, new uintptr) (old uintptr)
 // Consider using the more ergonomic and less error-prone [Pointer.Swap] instead.
 func SwapPointer(addr *unsafe.Pointer, new unsafe.Pointer) (old unsafe.Pointer)
 
-// CompareAndSwapInt32 executes the compare-and-swap operation for an int32 value.
-// Consider using the more ergonomic and less error-prone [Int32.CompareAndSwap] instead.
+// CompareAndSwapInt32 对int32值执行比较和交换操作。
+// 考虑使用更符合人体工程学且不易出错的 [Int32.CompareAndSwap]。
 func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
 
 // CompareAndSwapInt64 executes the compare-and-swap operation for an int64 value.
