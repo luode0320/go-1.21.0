@@ -8,9 +8,7 @@ import "unsafe"
 
 // defined in package runtime
 
-// Semacquire waits until *s > 0 and then atomically decrements it.
-// It is intended as a simple sleep primitive for use by the synchronization
-// library and should not be used directly.
+// Semacquire 原子递减。
 func runtime_Semacquire(s *uint32)
 
 // 用于对竞争的 Mutex 和 RWMutex 进行性能分析。
