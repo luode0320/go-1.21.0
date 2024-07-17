@@ -9,87 +9,72 @@ import (
 	"unsafe"
 )
 
-// Cond implements a condition variable, a rendezvous point
-// for goroutines waiting for or announcing the occurrence
-// of an event.
+// Cond 实现了条件变量，是 Goroutine 在等待事件发生或宣布事件发生时的会合点。
 //
-// Each Cond has an associated Locker L (often a *Mutex or *RWMutex),
-// which must be held when changing the condition and
-// when calling the Wait method.
+// 每个 Cond 都有一个关联的锁 L（通常是 *Mutex 或 *RWMutex），
+// 在改变条件和调用 Wait 方法时必须持有该锁。
 //
-// A Cond must not be copied after first use.
+// 在首次使用后，Cond 不得被复制。
 //
-// In the terminology of the Go memory model, Cond arranges that
-// a call to Broadcast or Signal “synchronizes before” any Wait call
-// that it unblocks.
+// 在 Go 内存模型的术语中，Cond 会安排 Broadcast 或 Signal 的调用“与任何它解除阻塞的 Wait 调用同步”。
 //
-// For many simple use cases, users will be better off using channels than a
-// Cond (Broadcast corresponds to closing a channel, and Signal corresponds to
-// sending on a channel).
+// 对于许多简单的用例，用户使用通道比使用 Cond 更好（Broadcast 对应于关闭通道，Signal 对应于在通道上发送）。
 //
-// For more on replacements for sync.Cond, see [Roberto Clapis's series on
-// advanced concurrency patterns], as well as [Bryan Mills's talk on concurrency
-// patterns].
+// 有关替代 sync.Cond 的更多信息，请参见 [Roberto Clapis 关于高级并发模式的系列文章]，以及 [Bryan Mills 关于并发模式的讲座]。
 //
-// [Roberto Clapis's series on advanced concurrency patterns]: https://blogtitle.github.io/categories/concurrency/
-// [Bryan Mills's talk on concurrency patterns]: https://drive.google.com/file/d/1nPdvhB0PutEJzdCq5ms6UI58dp50fcAN/view
+// [Roberto Clapis 关于高级并发模式的系列文章]: https://blogtitle.github.io/categories/concurrency/
+// [Bryan Mills 关于并发模式的讲座]: https://drive.google.com/file/d/1nPdvhB0PutEJzdCq5ms6UI58dp50fcAN/view
 type Cond struct {
-	noCopy noCopy
-
-	// L is held while observing or changing the condition
-	L Locker
-
-	notify  notifyList
-	checker copyChecker
+	noCopy  noCopy      // noCopy 用于确保 Cond 不被复制
+	L       Locker      // 表示可以锁定和解锁的对象（通常是 *Mutex 或 *RWMutex）。
+	notify  notifyList  // notify 用于通知列表
+	checker copyChecker // checker 用于检查复制
 }
 
-// NewCond returns a new Cond with Locker l.
+// NewCond 返回一个带有（通常是 *Mutex 或 *RWMutex）的新 Cond。
 func NewCond(l Locker) *Cond {
 	return &Cond{L: l}
 }
 
-// Wait atomically unlocks c.L and suspends execution
-// of the calling goroutine. After later resuming execution,
-// Wait locks c.L before returning. Unlike in other systems,
-// Wait cannot return unless awoken by Broadcast or Signal.
+// Wait 在原子性地解锁 c.L 并挂起调用 Goroutine 的执行。在稍后恢复执行后，
+// Wait 在返回之前会锁定 c.L。不同于其他系统，在没有被 Broadcast 或 Signal 唤醒的情况下，Wait 无法返回。
 //
-// Because c.L is not locked while Wait is waiting, the caller
-// typically cannot assume that the condition is true when
-// Wait returns. Instead, the caller should Wait in a loop:
+// 因为在 Wait 等待时 c.L 没有被锁定，调用者通常不能假设条件在 Wait 返回时就为真。
+// 在使用 Wait 之前, 你必须加锁 c.L.Lock():
 //
 //	c.L.Lock()
 //	for !condition() {
 //	    c.Wait()
 //	}
-//	... make use of condition ...
+//	... 利用条件 ...
 //	c.L.Unlock()
 func (c *Cond) Wait() {
+	// 检查是否存在复制
 	c.checker.check()
+	// 此 goroutine 添加到通知列表
 	t := runtime_notifyListAdd(&c.notify)
+	// 解锁 c.L
 	c.L.Unlock()
+	// 等待通知列表通知, 当前 goroutine 此时被阻塞
 	runtime_notifyListWait(&c.notify, t)
+
+	// 唤醒之后立开始竞争锁, 只有竞争到锁的才会结束 Wait 方法
+	// 保证共享数据的并发安全性
 	c.L.Lock()
 }
 
-// Signal wakes one goroutine waiting on c, if there is any.
-//
-// It is allowed but not required for the caller to hold c.L
-// during the call.
-//
-// Signal() does not affect goroutine scheduling priority; if other goroutines
-// are attempting to lock c.L, they may be awoken before a "waiting" goroutine.
+// Signal 唤醒在 c 上等待的一个 Goroutine（如果有的话）。
 func (c *Cond) Signal() {
+	// 检查是否存在复制
 	c.checker.check()
+	// 通知列表唤醒一个 Goroutine
 	runtime_notifyListNotifyOne(&c.notify)
 }
 
-// Broadcast wakes all goroutines waiting on c.
-//
-// It is allowed but not required for the caller to hold c.L
-// during the call.
+// Broadcast 唤醒所有在 c 上等待的 Goroutine。
 func (c *Cond) Broadcast() {
-	c.checker.check()
-	runtime_notifyListNotifyAll(&c.notify)
+	c.checker.check()                      // 检查是否存在复制
+	runtime_notifyListNotifyAll(&c.notify) // 通知列表唤醒所有 Goroutine
 }
 
 // copyChecker holds back pointer to itself to detect object copying.

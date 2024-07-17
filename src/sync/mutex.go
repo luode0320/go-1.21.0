@@ -41,7 +41,7 @@ type Mutex struct {
 	sema uint32
 }
 
-// A Locker represents an object that can be locked and unlocked.
+// Locker 表示可以锁定和解锁的对象。
 type Locker interface {
 	Lock()
 	Unlock()
