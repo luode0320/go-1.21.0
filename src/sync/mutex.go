@@ -104,27 +104,29 @@ func (m *Mutex) Lock() {
 	m.lockSlow()
 }
 
-// TryLock tries to lock m and reports whether it succeeded.
+// TryLock 尝试锁定互斥锁 m，并报告是否成功。
 //
-// Note that while correct uses of TryLock do exist, they are rare,
-// and use of TryLock is often a sign of a deeper problem
-// in a particular use of mutexes.
+// 注意：虽然使用 TryLock 的正确场景确实存在，但它们很少见，
+// 使用 TryLock 往往是特定互斥锁使用场景中潜在问题的一个迹象
 func (m *Mutex) TryLock() bool {
 	old := m.state
+
+	// 如果互斥锁当前被锁定或者处于饥饿模式，TryLock 快速失败。
 	if old&(mutexLocked|mutexStarving) != 0 {
 		return false
 	}
 
-	// There may be a goroutine waiting for the mutex, but we are
-	// running now and can try to grab the mutex before that
-	// goroutine wakes up.
+	// 尽管可能有其他 goroutine 正在等待互斥锁，但我们当前正在运行，
+	// 我们可以在那个 goroutine 被唤醒之前尝试获取互斥锁。
 	if !atomic.CompareAndSwapInt32(&m.state, old, old|mutexLocked) {
 		return false
 	}
 
+	// 如果启用了竞态检测，记录互斥锁的获取。
 	if race.Enabled {
 		race.Acquire(unsafe.Pointer(m))
 	}
+
 	return true
 }
 
