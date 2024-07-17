@@ -217,7 +217,7 @@ func (m *Mutex) lockSlow() {
 			// 当其他 Goroutine 释放了锁时，队头被阻塞的 Goroutine 会被唤醒
 			// queueLife = true, 将会把 goroutine 放到等待队列队头
 			// queueLife = false, 将会把 goroutine 放到等待队列队尾
-			runtime_SemacquireMutex(&m.sema, queueLifo, 1)
+			runtime_SemacquireMutex(&m.sema, queueLifo, 1) // Goroutine 阻塞加入等待队列，等待锁的释放
 
 			// 到这里，表示队头的 Goroutine 被唤醒, 继续执行下面代码
 
@@ -327,7 +327,7 @@ func (m *Mutex) unlockSlow(new int32) {
 				// 释放信号量，唤醒等待队列的一个的 Goroutine
 				// 信号量将按照先进先出（FIFO, First In First Out）的原则释放。
 				// 这意味着，如果多个 goroutines 正在等待信号量，那么最早进入等待队列的 goroutine 将被唤醒
-				runtime_Semrelease(&m.sema, false, 1)
+				runtime_Semrelease(&m.sema, false, 1) // 唤醒一个加锁阻塞的 goroutine
 				return
 			}
 
@@ -343,6 +343,6 @@ func (m *Mutex) unlockSlow(new int32) {
 		// 这意味着最近进入等待队列的 goroutine 将被唤醒。
 		// 因为饥饿模式下, 同一个 goroutine 一直获取锁, 一直失败
 		// 失败后会将这个 goroutine , 加入到最前面, 而不是排在队列最后面
-		runtime_Semrelease(&m.sema, true, 1)
+		runtime_Semrelease(&m.sema, true, 1) // 唤醒一个加锁阻塞的 goroutine
 	}
 }

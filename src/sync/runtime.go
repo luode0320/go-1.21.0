@@ -13,11 +13,13 @@ import "unsafe"
 // library and should not be used directly.
 func runtime_Semacquire(s *uint32)
 
-// runtime_SemacquireMutex(RW) 与 Semacquire 类似，但用于对竞争的 Mutex 和 RWMutex 进行性能分析。
-// 如果 lifo 为 true，则将等待者排在等待队列的头部。
-// skipframes 表示在跟踪时要省略的帧数，从 runtime_SemacquireMutex 的调用者开始计算。
+// 用于对竞争的 Mutex 和 RWMutex 进行性能分析。
 // 这个函数的不同形式仅告诉运行时如何在回溯中呈现等待的原因，并用于计算一些指标。
 // 否则，它们在功能上是相同的。
+//
+// s: 是控制 goroutine 的阻塞和唤醒操作的重要机制之一, 参数状态发生改变，goroutine 被唤醒，方法返回继续执行后续的工作。
+// lifo: 如果 lifo 为 true，则将等待者排在等待队列的头部。
+// skipframes: 表示在跟踪时要省略的帧数，从的调用者开始计算。
 func runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int)
 func runtime_SemacquireRWMutexR(s *uint32, lifo bool, skipframes int)
 func runtime_SemacquireRWMutex(s *uint32, lifo bool, skipframes int)
