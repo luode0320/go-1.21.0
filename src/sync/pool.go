@@ -11,53 +11,33 @@ import (
 	"unsafe"
 )
 
-// A Pool is a set of temporary objects that may be individually saved and
-// retrieved.
+// Pool 是一个可以单独保存和检索的临时对象集合。
 //
-// Any item stored in the Pool may be removed automatically at any time without
-// notification. If the Pool holds the only reference when this happens, the
-// item might be deallocated.
+// 存储在 Pool 中的任何项都可能在任何时候自动移除而无需通知。如果在这种情况下 Pool 拥有唯一引用，那么该项可能被释放。
 //
-// A Pool is safe for use by multiple goroutines simultaneously.
+// Pool 可以安全地同时被多个 goroutines 使用。
 //
-// Pool's purpose is to cache allocated but unused items for later reuse,
-// relieving pressure on the garbage collector. That is, it makes it easy to
-// build efficient, thread-safe free lists. However, it is not suitable for all
-// free lists.
+// Pool 的目的是为了缓存已分配但未使用的项以便以后重用，从而减轻垃圾收集器的压力。换言之，它使得构建高效、线程安全的空闲列表变得更容易。然而，并不是所有的空闲列表都适合使用 Pool。
 //
-// An appropriate use of a Pool is to manage a group of temporary items
-// silently shared among and potentially reused by concurrent independent
-// clients of a package. Pool provides a way to amortize allocation overhead
-// across many clients.
+// Pool 的适当用法是管理一组暂时性项，在包的并发独立客户端之间悄无声息共享并有可能重用。Pool 提供了一种方法在许多客户端之间分摊分配开销。
 //
-// An example of good use of a Pool is in the fmt package, which maintains a
-// dynamically-sized store of temporary output buffers. The store scales under
-// load (when many goroutines are actively printing) and shrinks when
-// quiescent.
+// fmt 包的一个良好使用示例是使用 Pool 维护动态大小的临时输出缓冲区存储器。当有很多 goroutines 正在活跃打印时，存储器会扩展；在空闲时则会缩小。
 //
-// On the other hand, a free list maintained as part of a short-lived object is
-// not a suitable use for a Pool, since the overhead does not amortize well in
-// that scenario. It is more efficient to have such objects implement their own
-// free list.
+// 另一方面，作为短期对象的空闲列表并不适合作为 Pool 的一种用法，因为在这种情况下开销不容易分摊。更有效的方式是让这些对象实现自己的空闲列表。
 //
-// A Pool must not be copied after first use.
+// Pool 在第一次使用后不能被复制。
 //
-// In the terminology of the Go memory model, a call to Put(x) “synchronizes before”
-// a call to Get returning that same value x.
-// Similarly, a call to New returning x “synchronizes before”
-// a call to Get returning that same value x.
+// 根据 Go 内存模型的术语，对于调用 Put(x) “先于” 返回相同值 x 的 Get 调用。
+// 类似地，调用 New 返回 x 的 Get 调用之前是“先于” New 的调用。
 type Pool struct {
-	noCopy noCopy
+	noCopy     noCopy         // 禁止复制
+	local      unsafe.Pointer // 每个 P 固定大小的本地池，实际类型是 [P]poolLocal
+	localSize  uintptr        // 本地数组的大小
+	victim     unsafe.Pointer // 上个周期的本地池
+	victimSize uintptr        // victims 数组的大小
 
-	local     unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
-	localSize uintptr        // size of the local array
-
-	victim     unsafe.Pointer // local from previous cycle
-	victimSize uintptr        // size of victims array
-
-	// New optionally specifies a function to generate
-	// a value when Get would otherwise return nil.
-	// It may not be changed concurrently with calls to Get.
+	// New 可选地指定一个函数，在 Get 返回 nil 时调用生成一个值。
+	// 不能在调用 Get 时并发更改它。
 	New func() any
 }
 
@@ -91,7 +71,7 @@ func poolRaceAddr(x any) unsafe.Pointer {
 	return unsafe.Pointer(&poolRaceHash[h%uint32(len(poolRaceHash))])
 }
 
-// Put adds x to the pool.
+// Put 将x添加到池中。
 func (p *Pool) Put(x any) {
 	if x == nil {
 		return
@@ -116,25 +96,22 @@ func (p *Pool) Put(x any) {
 	}
 }
 
-// Get selects an arbitrary item from the Pool, removes it from the
-// Pool, and returns it to the caller.
-// Get may choose to ignore the pool and treat it as empty.
-// Callers should not assume any relation between values passed to Put and
-// the values returned by Get.
+// Get 从 Pool 中选择任意一个项，将其从 Pool 中移除，并将其返回给调用者。
+// Get 可能选择忽略 Pool 并将其视为空。
+// 调用者不应假定 Put 传递的值与 Get 返回的值之间存在任何关系。
 //
-// If Get would otherwise return nil and p.New is non-nil, Get returns
-// the result of calling p.New.
+// 如果 Get 否则会返回 nil，且 p.New 非空，则 Get 返回调用 p.New 的结果。
 func (p *Pool) Get() any {
+	// 禁用竟态
 	if race.Enabled {
 		race.Disable()
 	}
+
 	l, pid := p.pin()
 	x := l.private
 	l.private = nil
 	if x == nil {
-		// Try to pop the head of the local shard. We prefer
-		// the head over the tail for temporal locality of
-		// reuse.
+		// 尝试弹出本地池的头。我们更倾向于使用头而不是尾部以保证重复利用的时间局部性。
 		x, _ = l.shared.popHead()
 		if x == nil {
 			x = p.getSlow(pid)
@@ -192,15 +169,15 @@ func (p *Pool) getSlow(pid int) any {
 	return nil
 }
 
-// pin pins the current goroutine to P, disables preemption and
-// returns poolLocal pool for the P and the P's id.
-// Caller must call runtime_procUnpin() when done with the pool.
+// 将当前 goroutine 固定到 Pool，禁用抢占并返回 P 的 poolLocal 池和 P 的 id。
+// 当使用完池时，调用者必须调用 runtime_procUnpin()。
 func (p *Pool) pin() (*poolLocal, int) {
 	pid := runtime_procPin()
-	// In pinSlow we store to local and then to localSize, here we load in opposite order.
-	// Since we've disabled preemption, GC cannot happen in between.
-	// Thus here we must observe local at least as large localSize.
-	// We can observe a newer/larger local, it is fine (we must observe its zero-initialized-ness).
+
+	// 在 pinSlow 中我们先存储到 local 本地再存储 localSize 大小，这里需要相反顺序加载。
+	// 由于我们禁用了抢占，GC 无法在其中发生。
+	// 因此，这里我们必须至少观察 local 本地大于等于 localSize 大小。
+	// 我们可以观察到一个更新/更大的 local，这没问题（我们必须观察其是否是零值初始化）。
 	s := runtime_LoadAcquintptr(&p.localSize) // load-acquire
 	l := p.local                              // load-consume
 	if uintptr(pid) < s {

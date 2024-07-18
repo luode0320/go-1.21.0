@@ -147,37 +147,47 @@ var ppFree = sync.Pool{
 	New: func() any { return new(pp) },
 }
 
-// newPrinter allocates a new pp struct or grabs a cached one.
+// 分配一个新的 pp 结构体或获取一个缓存的 pp 对象。
 func newPrinter() *pp {
+	// 从 sync.Pool 中获取一个 pp 对象，断言为 *pp 类型
 	p := ppFree.Get().(*pp)
+
+	// 重置 pp 对象的状态
 	p.panicking = false
 	p.erroring = false
 	p.wrapErrs = false
+
+	// 初始化 pp 对象的 fmt 字段，传入 pp 对象的 buf 字段作为缓冲区
 	p.fmt.init(&p.buf)
+
 	return p
 }
 
-// free saves used pp structs in ppFree; avoids an allocation per invocation.
+// 将已使用的 pp 结构体保存在 ppFree 中，避免每次调用都进行内存分配。
 func (p *pp) free() {
-	// Proper usage of a sync.Pool requires each entry to have approximately
-	// the same memory cost. To obtain this property when the stored type
-	// contains a variably-sized buffer, we add a hard limit on the maximum
-	// buffer to place back in the pool. If the buffer is larger than the
-	// limit, we drop the buffer and recycle just the printer.
+	// 使用 sync.Pool 需要确保每个存储的条目大致具有相同的内存成本。
+	// 当存储的类型包含一个大小可变的缓冲区时，为了满足这个属性，
+	// 我们对可以放回池中的最大缓冲区添加了一个硬限制。
+	// 如果缓冲区大于限制，则丢弃缓冲区只回收打印机。
 	//
-	// See https://golang.org/issue/23199.
+	// 参见 https://golang.org/issue/23199
 	if cap(p.buf) > 64*1024 {
-		p.buf = nil
+		p.buf = nil // 如果缓冲区超过限制大小，直接置空
 	} else {
-		p.buf = p.buf[:0]
+		p.buf = p.buf[:0] // 否则将缓冲区重置为长度为 0
 	}
+
+	// 如果 wrappedErrs 缓冲区容量大于 8，则置空
 	if cap(p.wrappedErrs) > 8 {
 		p.wrappedErrs = nil
 	}
 
+	// 重置 pp 对象的相关字段，准备复用
 	p.arg = nil
 	p.value = reflect.Value{}
-	p.wrappedErrs = p.wrappedErrs[:0]
+	p.wrappedErrs = p.wrappedErrs[:0] // 恢复 wrappedErrs 缓冲区长度为 0
+
+	// 将 pp 对象放回到 sync.Pool 中进行复用
 	ppFree.Put(p)
 }
 
@@ -217,14 +227,22 @@ func (p *pp) WriteString(s string) (ret int, err error) {
 
 // These routines end in 'f' and take a format string.
 
-// Fprintf formats according to a format specifier and writes to w.
-// It returns the number of bytes written and any write error encountered.
+// Fprintf 根据格式说明符进行格式化，并写入到 w 中。
+// 它返回写入的字节数以及遇到的任何写入错误。
 func Fprintf(w io.Writer, format string, a ...any) (n int, err error) {
+	// 分配一个新的 pp 对象
 	p := newPrinter()
+
+	// 使用 doPrintf 方法对格式说明符和参数进行格式化
 	p.doPrintf(format, a)
+
+	// 将格式化后的内容写入到 w 中，记录写入的字节数和可能的写入错误
 	n, err = w.Write(p.buf)
+
+	// 释放 pp 对象以便复用
 	p.free()
-	return
+
+	return // 返回写入的字节数和可能的错误
 }
 
 // Printf formats according to a format specifier and writes to standard output.
@@ -233,13 +251,21 @@ func Printf(format string, a ...any) (n int, err error) {
 	return Fprintf(os.Stdout, format, a...)
 }
 
-// Sprintf formats according to a format specifier and returns the resulting string.
+// Sprintf 根据格式说明符进行格式化，并返回结果字符串。
 func Sprintf(format string, a ...any) string {
+	// 分配一个新的 pp 对象
 	p := newPrinter()
+
+	// 使用 doPrintf 方法对格式说明符和参数进行格式化
 	p.doPrintf(format, a)
+
+	// 将格式化后的内容转换为字符串
 	s := string(p.buf)
+
+	// 释放 pp 对象以便复用
 	p.free()
-	return s
+
+	return s // 返回格式化后的字符串
 }
 
 // Appendf formats according to a format specifier, appends the result to the byte
