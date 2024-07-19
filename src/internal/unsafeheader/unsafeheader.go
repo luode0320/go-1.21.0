@@ -9,9 +9,7 @@
 // are tested to be equivalent to reflect.SliceHeader and reflect.StringHeader.
 package unsafeheader
 
-import (
-	"unsafe"
-)
+import "unsafe"
 
 // Slice is the runtime representation of a slice.
 // It cannot be used safely or portably and its representation may
@@ -20,9 +18,9 @@ import (
 // Unlike reflect.SliceHeader, its Data field is sufficient to guarantee the
 // data it references will not be garbage collected.
 type Slice struct {
-	Data unsafe.Pointer
-	Len  int
-	Cap  int
+	Data unsafe.Pointer // 指向切片数据的指针
+	Len  int            // 切片的长度
+	Cap  int            // 切片的容量
 }
 
 // String is the runtime representation of a string.
@@ -32,6 +30,6 @@ type Slice struct {
 // Unlike reflect.StringHeader, its Data field is sufficient to guarantee the
 // data it references will not be garbage collected.
 type String struct {
-	Data unsafe.Pointer
-	Len  int
+	Data unsafe.Pointer // 指向字符串数据的指针
+	Len  int            // 字符串的长度
 }

@@ -2773,8 +2773,8 @@ func (v Value) UnsafePointer() unsafe.Pointer {
 //
 // Deprecated: Use unsafe.String or unsafe.StringData instead.
 type StringHeader struct {
-	Data uintptr
-	Len  int
+	Data uintptr // 指向字符串数据的指针
+	Len  int     // 字符串的长度
 }
 
 // SliceHeader is the runtime representation of a slice.
@@ -2786,9 +2786,9 @@ type StringHeader struct {
 //
 // Deprecated: Use unsafe.Slice or unsafe.SliceData instead.
 type SliceHeader struct {
-	Data uintptr
-	Len  int
-	Cap  int
+	Data unsafe.Pointer // 指向切片数据的指针
+	Len  int            // 切片的长度
+	Cap  int            // 切片的容量
 }
 
 func typesMustMatch(what string, t1, t2 Type) {
