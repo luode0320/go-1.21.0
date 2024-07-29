@@ -15,69 +15,62 @@ import (
 	"unsafe"
 )
 
-// Value is the reflection interface to a Go value.
+// Value 是 Go 值的反射接口。
 //
-// Not all methods apply to all kinds of values. Restrictions,
-// if any, are noted in the documentation for each method.
-// Use the Kind method to find out the kind of value before
-// calling kind-specific methods. Calling a method
-// inappropriate to the kind of type causes a run time panic.
+// 并非所有方法都适用于所有类型的值。如果有限制，将在每个方法的文档中进行说明。
+// 在调用特定于类型的方法之前，请使用 Kind 方法查找值的类型。
+// 调用不适合类型的方法将导致运行时恐慌。
 //
-// The zero Value represents no value.
-// Its IsValid method returns false, its Kind method returns Invalid,
-// its String method returns "<invalid Value>", and all other methods panic.
-// Most functions and methods never return an invalid value.
-// If one does, its documentation states the conditions explicitly.
+// 零值 Value 表示没有值。
+// 其 IsValid 方法返回 false，其 Kind 方法返回 Invalid，
+// 其 String 方法返回 "<invalid Value>"，所有其他方法将导致恐慌。
+// 大多数函数和方法从不返回无效值。
+// 如果有一个函数返回无效值，其文档将明确说明条件。
 //
-// A Value can be used concurrently by multiple goroutines provided that
-// the underlying Go value can be used concurrently for the equivalent
-// direct operations.
+// 可以通过多个 goroutine 并发使用 Value，前提是底层的 Go 值可以用于等效的直接操作。
 //
-// To compare two Values, compare the results of the Interface method.
-// Using == on two Values does not compare the underlying values
-// they represent.
+// 要比较两个 Value，请比较 Interface 方法的结果。
+// 在两个 Value 上使用 == 不会比较它们所代表的底层值。
 type Value struct {
-	// typ_ holds the type of the value represented by a Value.
-	// Access using the typ method to avoid escape of v.
+	// typ_ 持有由 Value 表示的值的类型。
+	// 使用 typ 方法访问以避免 v 的逃逸。
 	typ_ *abi.Type
 
-	// Pointer-valued data or, if flagIndir is set, pointer to data.
-	// Valid when either flagIndir is set or typ.pointers() is true.
+	// 指针值数据，或者如果设置了 flagIndir，则为数据的指针。
+	// 当 flagIndir 被设置或 typ.pointers() 为 true 时有效。
 	ptr unsafe.Pointer
 
-	// flag holds metadata about the value.
+	// flag 包含关于值的元数据。
 	//
-	// The lowest five bits give the Kind of the value, mirroring typ.Kind().
+	// 最低的五位给出值的 Kind，与 typ.Kind() 相对应。
 	//
-	// The next set of bits are flag bits:
-	//	- flagStickyRO: obtained via unexported not embedded field, so read-only
-	//	- flagEmbedRO: obtained via unexported embedded field, so read-only
-	//	- flagIndir: val holds a pointer to the data
-	//	- flagAddr: v.CanAddr is true (implies flagIndir and ptr is non-nil)
-	//	- flagMethod: v is a method value.
-	// If ifaceIndir(typ), code can assume that flagIndir is set.
+	// 接下来的一组位是 flag 位：
+	//	- flagStickyRO：通过非导出的非嵌入字段获得，因此是只读的
+	//	- flagEmbedRO：通过非导出的嵌入字段获得，因此是只读的
+	//	- flagIndir：val 持有数据的指针
+	//	- flagAddr：v.CanAddr 为 true (意味着 flagIndir 为真且 ptr 不为 nil)
+	//	- flagMethod：v 是一个方法值。
+	// 如果 ifaceIndir(typ)，则代码可以假定 flagIndir 被设置。
 	//
-	// The remaining 22+ bits give a method number for method values.
-	// If flag.kind() != Func, code can assume that flagMethod is unset.
+	// 剩余的 22+ 位给出方法值的方法编号。
+	// 如果 flag.kind() != Func，则代码可以假定 flagMethod 未设置。
 	flag
 
-	// A method value represents a curried method invocation
-	// like r.Read for some receiver r. The typ+val+flag bits describe
-	// the receiver r, but the flag's Kind bits say Func (methods are
-	// functions), and the top bits of the flag give the method number
-	// in r's type's method table.
+	// 方法值表示某个接收者 r 的柯里化方法调用，例如 r.Read。
+	// typ+val+flag 位描述接收者 r，但 flag 的 Kind 位表示 Func（方法是函数），
+	// 并且 flag 的顶部比特给出 r 类型的方法表中的方法编号。
 }
 
 type flag uintptr
 
 const (
-	flagKindWidth        = 5 // there are 27 kinds
-	flagKindMask    flag = 1<<flagKindWidth - 1
-	flagStickyRO    flag = 1 << 5
-	flagEmbedRO     flag = 1 << 6
-	flagIndir       flag = 1 << 7
-	flagAddr        flag = 1 << 8
-	flagMethod      flag = 1 << 9
+	flagKindWidth        = 5                    // 有 27 种类型
+	flagKindMask    flag = 1<<flagKindWidth - 1 // 表示 Kind 类型的掩码位
+	flagStickyRO    flag = 1 << 5               //通过非导出的非嵌入字段获得，因此是只读的
+	flagEmbedRO     flag = 1 << 6               // 通过非导出的嵌入字段获得，因此是只读的
+	flagIndir       flag = 1 << 7               // val 持有数据的指针
+	flagAddr        flag = 1 << 8               // v.CanAddr 为 true (意味着 flagIndir 为真且 ptr 不为 nil)
+	flagMethod      flag = 1 << 9               // v 是一个方法值。
 	flagMethodShift      = 10
 	flagRO          flag = flagStickyRO | flagEmbedRO
 )
@@ -152,18 +145,28 @@ func packEface(v Value) any {
 	return i
 }
 
-// unpackEface converts the empty interface i to a Value.
+// 将接口 i 转换为一个 Value。
 func unpackEface(i any) Value {
+	// 将接口 i 转换为 emptyInterface 结构体指针, 所有的类型都实现了空接口
 	e := (*emptyInterface)(unsafe.Pointer(&i))
-	// NOTE: don't read e.word until we know whether it is really a pointer or not.
+
+	// 注意: 在确定它是否真的是指针之前，不要读取 e.word。
+
+	// 获取接口中存储的类型信息
 	t := e.typ
+	// 如果类型信息为空，返回空的 Value
 	if t == nil {
 		return Value{}
 	}
+
+	// 获取类型的 Kind 值，并转换为 flag 类型
 	f := flag(t.Kind())
+	// 如果类型需要间接引用，则设置标志 flagIndir
 	if t.IfaceIndir() {
 		f |= flagIndir
 	}
+
+	// 返回包含类型信息、值以及标志的 Value 结构体
 	return Value{t, e.word, f}
 }
 
@@ -348,21 +351,19 @@ func (v Value) runes() []rune {
 	return *(*[]rune)(v.ptr)
 }
 
-// CanAddr reports whether the value's address can be obtained with Addr.
-// Such values are called addressable. A value is addressable if it is
-// an element of a slice, an element of an addressable array,
-// a field of an addressable struct, or the result of dereferencing a pointer.
-// If CanAddr returns false, calling Addr will panic.
+// CanAddr 报告值的地址是否可以通过 Addr 获取。
+// 这样的值称为可寻址的。如果值是切片的元素、可寻址数组的元素、可寻址结构体的字段，或者对指针进行解引用的结果，则该值是可寻址的。
+// 如果 CanAddr 返回 false，则调用 Addr 会引发 panic。
 func (v Value) CanAddr() bool {
+	// 检查标志位 flagAddr 是否设置，以判断值是否可寻址
 	return v.flag&flagAddr != 0
 }
 
-// CanSet reports whether the value of v can be changed.
-// A Value can be changed only if it is addressable and was not
-// obtained by the use of unexported struct fields.
-// If CanSet returns false, calling Set or any type-specific
-// setter (e.g., SetBool, SetInt) will panic.
+// CanSet 报告是否可以更改 v 的值。
+// 一个值只有在可寻址且不是通过未公开的结构字段获得时才可以更改。
+// 如果 CanSet 返回 false，则调用 Set 或任何特定类型的 setter 方法（例如 SetBool、SetInt）会引发 panic。
 func (v Value) CanSet() bool {
+	// 通过检查标志位 flagAddr 和 flagRO 来确定值是否可更改
 	return v.flag&(flagAddr|flagRO) == flagAddr
 }
 
@@ -1271,35 +1272,43 @@ func (v Value) Elem() Value {
 	panic(&ValueError{"reflect.Value.Elem", v.kind()})
 }
 
-// Field returns the i'th field of the struct v.
-// It panics if v's Kind is not Struct or i is out of range.
+// Field 返回结构体 v 中第 i 个字段的值。
+// 如果 v 的种类不是 Struct 或者 i 超出范围，则会引发 panic。
 func (v Value) Field(i int) Value {
+	// 如果值的种类不是 Struct，则引发错误
 	if v.kind() != Struct {
 		panic(&ValueError{"reflect.Value.Field", v.kind()})
 	}
+
+	// 将值的类型转换为 structType 类型
 	tt := (*structType)(unsafe.Pointer(v.typ()))
+	// 如果字段索引超出范围，则引发错误
 	if uint(i) >= uint(len(tt.Fields)) {
 		panic("reflect: Field index out of range")
 	}
 	field := &tt.Fields[i]
 	typ := field.Typ
 
-	// Inherit permission bits from v, but clear flagEmbedRO.
+	// 继承权限位从 v，并清除 flagEmbedRO。
 	fl := v.flag&(flagStickyRO|flagIndir|flagAddr) | flag(typ.Kind())
-	// Using an unexported field forces flagRO.
+	// 对于未公开的字段，强制设置为只读。
 	if !field.Name.IsExported() {
 		if field.Embedded() {
-			fl |= flagEmbedRO
+			fl |= flagEmbedRO // 如果是嵌入字段，则设置 flagEmbedRO
 		} else {
-			fl |= flagStickyRO
+			fl |= flagStickyRO // 如果不是嵌入字段，则设置 flagStickyRO
 		}
 	}
-	// Either flagIndir is set and v.ptr points at struct,
-	// or flagIndir is not set and v.ptr is the actual struct data.
-	// In the former case, we want v.ptr + offset.
-	// In the latter case, we must have field.offset = 0,
-	// so v.ptr + field.offset is still the correct address.
+
+	// flagIndir 设置并且 v.ptr 指向结构体，或者 flagIndir 未设置且 v.ptr 是实际的结构体数据。
+	// 在前一种情况下，我们希望 v.ptr + offset。
+	// 在后一种情况下，我们必须有 field.offset = 0，
+	// 因此 v.ptr + field.offset 仍然是正确的地址。
+
+	// 计算字段在结构体中的地址
 	ptr := add(v.ptr, field.Offset, "same as non-reflect &v.field")
+
+	// 返回字段值的 Value 类型
 	return Value{typ, ptr, fl}
 }
 
@@ -1471,7 +1480,7 @@ func (v Value) Int() int64 {
 	panic(&ValueError{"reflect.Value.Int", v.kind()})
 }
 
-// CanInterface reports whether Interface can be used without panicking.
+// CanInterface 报告是否可以在不发生恐慌的情况下使用接口。
 func (v Value) CanInterface() bool {
 	if v.flag == 0 {
 		panic(&ValueError{"reflect.Value.CanInterface", Invalid})
@@ -1479,45 +1488,51 @@ func (v Value) CanInterface() bool {
 	return v.flag&flagRO == 0
 }
 
-// Interface returns v's current value as an interface{}.
-// It is equivalent to:
+// Interface 将 v 的当前值作为 interface{} 返回。
+// 它等效于:
 //
-//	var i interface{} = (v's underlying value)
+//	var i interface{} = (v 的底层值)
 //
-// It panics if the Value was obtained by accessing
-// unexported struct fields.
+// 如果通过访问未公开的结构字段获取了该值，则会引发 panic。
 func (v Value) Interface() (i any) {
 	return valueInterface(v, true)
 }
 
+// 将 v 的值转换为 interface{} 类型，并根据参数 safe 决定是否允许访问未公开的字段。
 func valueInterface(v Value, safe bool) any {
+	// 如果值的标志为0，则引发错误
 	if v.flag == 0 {
 		panic(&ValueError{"reflect.Value.Interface", Invalid})
 	}
+
 	if safe && v.flag&flagRO != 0 {
-		// Do not allow access to unexported values via Interface,
-		// because they might be pointers that should not be
-		// writable or methods or function that should not be callable.
+		// 不允许通过 Interface 访问未公开的值，
+		// 因为它们可能是不应该被写入的指针或不应该被调用的方法或函数。
 		panic("reflect.Value.Interface: cannot return value obtained from unexported field or method")
 	}
+
+	// 创建方法值
 	if v.flag&flagMethod != 0 {
 		v = makeMethodValue("Interface", v)
 	}
 
+	// 如果值的种类为 Interface
 	if v.kind() == Interface {
-		// Special case: return the element inside the interface.
-		// Empty interface has one layout, all interfaces with
-		// methods have a second layout.
+		// 特殊情况：返回接口内部的元素。
+		// 空接口有一个布局，所有带方法的接口有第二个布局。
 		if v.NumMethod() == 0 {
+			// 返回接口内部元素的值
 			return *(*any)(v.ptr)
 		}
+
+		// 返回接口内部带方法的值
 		return *(*interface {
 			M()
 		})(v.ptr)
 	}
 
-	// TODO: pass safe to packEface so we don't need to copy if safe==true?
-	return packEface(v)
+	// TODO: 在 safe==true 时传递 safe 到 packEface，这样如果 safe==true 则不需要复制？
+	return packEface(v) // 返回值的接口表示
 }
 
 // InterfaceData returns a pair of unspecified uintptr values.
@@ -1541,17 +1556,15 @@ func (v Value) InterfaceData() [2]uintptr {
 	return *(*[2]uintptr)(v.ptr)
 }
 
-// IsNil reports whether its argument v is nil. The argument must be
-// a chan, func, interface, map, pointer, or slice value; if it is
-// not, IsNil panics. Note that IsNil is not always equivalent to a
-// regular comparison with nil in Go. For example, if v was created
-// by calling ValueOf with an uninitialized interface variable i,
-// i==nil will be true but v.IsNil will panic as v will be the zero
-// Value.
+// IsNil 报告参数 v 是否为 nil。参数必须是 chan、func、interface、map、pointer 或 slice 值；如果不是，则 IsNil 会引发 panic。
+// 需要注意的是，在 Go 语言中，IsNil 并不总是等同于与 nil 进行常规比较。例如，如果 v 是通过使用未初始化的接口变量 i 调用 ValueOf 创建的，
+// 则 i==nil 会返回 true，但是 v.IsNil 会引发 panic，因为 v 是零值
 func (v Value) IsNil() bool {
+	// 获取值的种类
 	k := v.kind()
 	switch k {
 	case Chan, Func, Map, Pointer, UnsafePointer:
+		// 对于 chan、func、map、pointer、unsafe pointer 类型的处理
 		if v.flag&flagMethod != 0 {
 			return false
 		}
@@ -1561,18 +1574,21 @@ func (v Value) IsNil() bool {
 		}
 		return ptr == nil
 	case Interface, Slice:
-		// Both interface and slice are nil if first word is 0.
-		// Both are always bigger than a word; assume flagIndir.
+		// 对于 interface 和 slice 类型的处理
+		// 如果第一个字为0，interface和slice均为nil。
+		// 两者始终大于一个字；假设 flagIndir。
 		return *(*unsafe.Pointer)(v.ptr) == nil
 	}
+
+	// 抛出错误，表明调用了不支持 IsNil 操作的类型
 	panic(&ValueError{"reflect.Value.IsNil", v.kind()})
 }
 
-// IsValid reports whether v represents a value.
-// It returns false if v is the zero Value.
-// If IsValid returns false, all other methods except String panic.
-// Most functions and methods never return an invalid Value.
-// If one does, its documentation states the conditions explicitly.
+// IsValid 报告 v 是否表示一个值。
+// 如果 v 是空 Value，则返回 false。
+// 如果 IsValid 返回 false，则除 String 外的所有其他方法都会引发 panic。
+// 大多数函数和方法永远不会返回无效的 Value。
+// 如果有一个函数返回无效的 Value，则其文档会明确说明条件。
 func (v Value) IsValid() bool {
 	return v.flag != 0
 }
@@ -1693,8 +1709,8 @@ func (v Value) SetZero() {
 	}
 }
 
-// Kind returns v's Kind.
-// If v is the zero Value (IsValid returns false), Kind returns Invalid.
+// Kind 返回 v 的类型。
+// 如果 v 是空 Value（IsValid 返回 false），Kind 返回 Invalid。
 func (v Value) Kind() Kind {
 	return v.kind()
 }
@@ -2002,10 +2018,9 @@ func copyVal(typ *abi.Type, fl flag, ptr unsafe.Pointer) Value {
 	return Value{typ, *(*unsafe.Pointer)(ptr), fl}
 }
 
-// Method returns a function value corresponding to v's i'th method.
-// The arguments to a Call on the returned function should not include
-// a receiver; the returned function will always use v as the receiver.
-// Method panics if i is out of range or if v is a nil interface value.
+// Method 返回与结构体 v 的第 i 个方法对应的函数值。
+// 调用返回的函数时，不应包含接收者；返回的函数将始终将 v 作为接收者。
+// 如果 i 超出范围或者 v 是空接口值，则会引发 panic。
 func (v Value) Method(i int) Value {
 	if v.typ() == nil {
 		panic(&ValueError{"reflect.Value.Method", Invalid})
@@ -2056,12 +2071,12 @@ func (v Value) MethodByName(name string) Value {
 	return v.Method(m.Index)
 }
 
-// NumField returns the number of fields in the struct v.
-// It panics if v's Kind is not Struct.
+// NumField 返回结构体 v 中的字段数。
+// 如果 v 的种类不是 Struct，则会引发 panic。
 func (v Value) NumField() int {
-	v.mustBe(Struct)
-	tt := (*structType)(unsafe.Pointer(v.typ()))
-	return len(tt.Fields)
+	v.mustBe(Struct)                             // 确保值的种类是 Struct 类型，否则会引发 panic
+	tt := (*structType)(unsafe.Pointer(v.typ())) // 将值的类型转换为 structType 类型
+	return len(tt.Fields)                        // 返回结构体的字段数
 }
 
 // OverflowComplex reports whether the complex128 x cannot be represented by v's type.
@@ -2577,17 +2592,20 @@ func (v Value) Slice3(i, j, k int) Value {
 	return Value{typ.Common(), unsafe.Pointer(&x), fl}
 }
 
-// String returns the string v's underlying value, as a string.
-// String is a special case because of Go's String method convention.
-// Unlike the other getters, it does not panic if v's Kind is not String.
-// Instead, it returns a string of the form "<T value>" where T is v's type.
-// The fmt package treats Values specially. It does not call their String
-// method implicitly but instead prints the concrete values they hold.
+// String 返回字符串 v 的基础值，作为一个字符串。
+// String 是一个特殊情况，因为 Go 的 String 方法约定。
+// 与其他 getter 方法不同，如果 v 的类型不是 String，它不会引发 panic。
+// 而是返回一个形如 "<T value>" 的字符串，其中 T 是 v 的类型。
+// fmt包对 Values 进行了特殊处理。它不会隐式调用它们的 String 方法，而是打印它们持有的具体值。
 func (v Value) String() string {
-	// stringNonString is split out to keep String inlineable for string kinds.
+	// stringNonString 被拆分出来，以保持 String 方法对于字符串类型的内联。
+
+	// 如果类型为 String，则将 v.ptr 解析为字符串并返回
 	if v.kind() == String {
 		return *(*string)(v.ptr)
 	}
+
+	// 调用 stringNonString 方法处理非字符串类型的情况
 	return v.stringNonString()
 }
 
@@ -2595,8 +2613,8 @@ func (v Value) stringNonString() string {
 	if v.kind() == Invalid {
 		return "<invalid Value>"
 	}
-	// If you call String on a reflect.Value of other type, it's better to
-	// print something than to panic. Useful in debugging.
+
+	// 如果你在其他类型的reflect.Value上调用String，最好打印一些东西而不是恐慌。在调试中很有用。
 	return "<" + v.Type().String() + " Value>"
 }
 
@@ -3198,17 +3216,19 @@ func Indirect(v Value) Value {
 // (for debugging).
 const go121noForceValueEscape = true
 
-// ValueOf returns a new Value initialized to the concrete value
-// stored in the interface i. ValueOf(nil) returns the zero Value.
+// ValueOf 从接口 i 中返回一个新的 Value，其被初始化为接口中存储的具体值。
+// ValueOf(nil) 返回一个零值的 Value。
 func ValueOf(i any) Value {
 	if i == nil {
 		return Value{}
 	}
 
+	// 如果不是 go1.21 强制 Value 逃逸，则执行逃逸操作
 	if !go121noForceValueEscape {
 		escapes(i)
 	}
 
+	// 返回接口 i 的值
 	return unpackEface(i)
 }
 
