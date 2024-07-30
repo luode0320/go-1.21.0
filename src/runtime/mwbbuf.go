@@ -148,123 +148,120 @@ func (b *wbBuf) get2() *[2]uintptr {
 	return p
 }
 
-// wbBufFlush flushes the current P's write barrier buffer to the GC
-// workbufs.
+// wbBufFlush 将当前 P 的写屏障缓冲区刷新到垃圾回收的工作缓冲区。
 //
-// This must not have write barriers because it is part of the write
-// barrier implementation.
+// 本函数不允许包含写屏障，因为它本身就是写屏障实现的一部分。
 //
-// This and everything it calls must be nosplit because 1) the stack
-// contains untyped slots from gcWriteBarrier and 2) there must not be
-// a GC safe point between the write barrier test in the caller and
-// flushing the buffer.
+// 本函数及其调用的所有函数都必须不包含分割点（nosplit），因为：
+// 1) 栈中包含来自 gcWriteBarrier 的未类型化的槽位。
+// 2) 在调用者中的写屏障测试和刷新缓冲区之间不能有 GC 安全点。
 //
-// TODO: A "go:nosplitrec" annotation would be perfect for this.
+// TODO: 一个 "go:nosplitrec" 注解对于这个函数来说非常合适。
 //
 //go:nowritebarrierrec
 //go:nosplit
 func wbBufFlush() {
-	// Note: Every possible return from this function must reset
-	// the buffer's next pointer to prevent buffer overflow.
+	// 注意：本函数中的每一个可能的返回路径都必须重置缓冲区的 next 指针，
+	// 以防止缓冲区溢出。
+	// 本函数不允许包含写屏障，因为它本身就是写屏障实现的一部分
 
+	// 如果当前 goroutine 正在关闭 (getg().m.dying > 0)，则直接丢弃写屏障缓冲区的内容
 	if getg().m.dying > 0 {
-		// We're going down. Not much point in write barriers
-		// and this way we can allow write barriers in the
-		// panic path.
+		// 丢弃当前 P 的写屏障缓冲区
 		getg().m.p.ptr().wbBuf.discard()
 		return
 	}
 
-	// Switch to the system stack so we don't have to worry about
-	// safe points.
+	// 切换到系统栈，以避免 GC 安全点，确保写屏障操作的连续性
 	systemstack(func() {
-		wbBufFlush1(getg().m.p.ptr())
+		wbBufFlush1(getg().m.p.ptr()) // 刷新写屏障缓冲区
 	})
 }
 
-// wbBufFlush1 flushes p's write barrier buffer to the GC work queue.
+// wbBufFlush1 将 P 的写屏障缓冲区刷新到垃圾回收的工作队列。
 //
-// This must not have write barriers because it is part of the write
-// barrier implementation, so this may lead to infinite loops or
-// buffer corruption.
+// 本函数不允许包含写屏障，因为它本身就是写屏障实现的一部分，因此可能会导致无限循环或缓冲区损坏。
 //
-// This must be non-preemptible because it uses the P's workbuf.
+// 本函数必须是非抢占式的，因为它使用了 P 的工作缓冲区。
 //
 //go:nowritebarrierrec
 //go:systemstack
 func wbBufFlush1(pp *p) {
-	// Get the buffered pointers.
+	// 获取缓冲区中的指针。
 	start := uintptr(unsafe.Pointer(&pp.wbBuf.buf[0]))
+	// 计算缓冲区中的指针数量
 	n := (pp.wbBuf.next - start) / unsafe.Sizeof(pp.wbBuf.buf[0])
+	// 获取缓冲区中的前 n 个指针
 	ptrs := pp.wbBuf.buf[:n]
 
-	// Poison the buffer to make extra sure nothing is enqueued
-	// while we're processing the buffer.
+	// 将缓冲区的 next 指针设置为 0，防止在处理缓冲区期间有新的指针被加入
 	pp.wbBuf.next = 0
 
+	// 如果使用 Checkmark 模式，则遍历所有指针并调用 shade 函数将它们标记为灰色
 	if useCheckmark {
-		// Slow path for checkmark mode.
+		// 遍历所有指针
 		for _, ptr := range ptrs {
-			shade(ptr)
+			shade(ptr) // 将指针标记为灰色
 		}
-		pp.wbBuf.reset()
+		pp.wbBuf.reset() // 重置写屏障缓冲区
 		return
 	}
 
-	// Mark all of the pointers in the buffer and record only the
-	// pointers we greyed. We use the buffer itself to temporarily
-	// record greyed pointers.
+	// 标记缓冲区中的所有指针，并只记录那些被标记为灰色的指针。
+	// 我们使用缓冲区本身来临时记录被标记为灰色的指针。
 	//
-	// TODO: Should scanobject/scanblock just stuff pointers into
-	// the wbBuf? Then this would become the sole greying path.
+	// TODO: scanobject/scanblock 是否可以直接将指针放入 wbBuf？如果是这样，这将成为唯一的灰色标记路径。
 	//
-	// TODO: We could avoid shading any of the "new" pointers in
-	// the buffer if the stack has been shaded, or even avoid
-	// putting them in the buffer at all (which would double its
-	// capacity). This is slightly complicated with the buffer; we
-	// could track whether any un-shaded goroutine has used the
-	// buffer, or just track globally whether there are any
-	// un-shaded stacks and flush after each stack scan.
+	// TODO: 如果栈已经被标记，我们可以避免标记缓冲区中的“新”指针，甚至完全避免将它们放入缓冲区（这将使缓冲区容量翻倍）。
+	// 这对于缓冲区稍微有些复杂；我们可以跟踪是否有未标记的 goroutine 使用了缓冲区，或者全局跟踪是否有未标记的栈，并在每次栈扫描后刷新。
+
+	// 获取当前 P 的垃圾回收工作缓冲区
 	gcw := &pp.gcw
+	// 初始化位置指针
 	pos := 0
+	// 遍历所有指针
 	for _, ptr := range ptrs {
+		// 过滤掉非法指针和已标记的指针
 		if ptr < minLegalPointer {
-			// nil pointers are very common, especially
-			// for the "old" values. Filter out these and
-			// other "obvious" non-heap pointers ASAP.
-			//
-			// TODO: Should we filter out nils in the fast
-			// path to reduce the rate of flushes?
 			continue
 		}
+
+		// 查找指针所指向的对象
 		obj, span, objIndex := findObject(ptr, 0, 0)
 		if obj == 0 {
 			continue
 		}
-		// TODO: Consider making two passes where the first
-		// just prefetches the mark bits.
+
+		// TODO: 考虑采用两步法，第一步只是预取标记位。
+
+		// 获取对象的标记位
 		mbits := span.markBitsForIndex(objIndex)
 		if mbits.isMarked() {
 			continue
 		}
+		// 将对象标记为已标记
 		mbits.setMarked()
 
-		// Mark span.
+		// 标记 span。
 		arena, pageIdx, pageMask := pageIndexOf(span.base())
 		if arena.pageMarks[pageIdx]&pageMask == 0 {
+			// 标记 span 所在的页
 			atomic.Or8(&arena.pageMarks[pageIdx], pageMask)
 		}
 
+		// 如果 span 无需扫描，则标记为黑色
 		if span.spanclass.noscan() {
 			gcw.bytesMarked += uint64(span.elemsize)
 			continue
 		}
+
+		// 将对象加入到灰色指针数组中
 		ptrs[pos] = obj
 		pos++
 	}
 
-	// Enqueue the greyed objects.
+	// 将标记为灰色的对象加入到工作缓冲区中
 	gcw.putBatch(ptrs[:pos])
-
+	// 重置写屏障缓冲区
 	pp.wbBuf.reset()
 }

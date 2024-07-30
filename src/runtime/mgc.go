@@ -783,119 +783,93 @@ func gcStart(trigger gcTrigger) {
 // This is protected by markDoneSema.
 var gcMarkDoneFlushed uint32
 
-// gcMarkDone transitions the GC from mark to mark termination if all
-// reachable objects have been marked (that is, there are no grey
-// objects and can be no more in the future). Otherwise, it flushes
-// all local work to the global queues where it can be discovered by
-// other workers.
+// gcMarkDone 函数用于将垃圾回收从标记阶段转换到标记终止阶段，如果所有可达的对象已经被标记。
+// 如果还有未标记的对象存在或未来可能有新对象产生，则将所有本地工作刷新到全局队列中，
+// 使其可以被其他工作者发现并处理。
 //
-// This should be called when all local mark work has been drained and
-// there are no remaining workers. Specifically, when
+// 此函数应该在所有本地标记工作完成并且没有剩余工作者时被调用。具体来说，当满足以下条件时：
 //
 //	work.nwait == work.nproc && !gcMarkWorkAvailable(p)
 //
-// The calling context must be preemptible.
+// 调用上下文必须是可以抢占的。
 //
-// Flushing local work is important because idle Ps may have local
-// work queued. This is the only way to make that work visible and
-// drive GC to completion.
+// 刷新本地工作非常重要，因为空闲的 P 可能有本地队列中的工作。这是使这些工作可见并驱动垃圾回收完成的唯一途径。
 //
-// It is explicitly okay to have write barriers in this function. If
-// it does transition to mark termination, then all reachable objects
-// have been marked, so the write barrier cannot shade any more
-// objects.
+// 在此函数中显式允许使用写屏障。如果它确实转换到标记终止阶段，那么所有可达的对象都已被标记，
+// 因此写屏障不会再遮蔽任何对象。
 func gcMarkDone() {
-	// Ensure only one thread is running the ragged barrier at a
-	// time.
+	// 确保只有一个线程在同一时间运行 ragged barrier。
 	semacquire(&work.markDoneSema)
 
 top:
-	// Re-check transition condition under transition lock.
+	// 在转换锁下重新检查转换条件。
 	//
-	// It's critical that this checks the global work queues are
-	// empty before performing the ragged barrier. Otherwise,
-	// there could be global work that a P could take after the P
-	// has passed the ragged barrier.
+	// 关键是必须在执行 ragged barrier 之前检查全局工作队列是否为空。
+	// 否则，可能存在全局工作，而 P 在通过 ragged barrier 后可能会获取这些工作。
 	if !(gcphase == _GCmark && work.nwait == work.nproc && !gcMarkWorkAvailable(nil)) {
 		semrelease(&work.markDoneSema)
 		return
 	}
 
-	// forEachP needs worldsema to execute, and we'll need it to
-	// stop the world later, so acquire worldsema now.
-	semacquire(&worldsema)
+	// forEachP 需要 worldsema 执行，而我们稍后也需要它来停止世界，因此现在获取 worldsema。
+	semacquire(&worldsema) // 获取 worldsema 锁，用于停止世界
 
-	// Flush all local buffers and collect flushedWork flags.
+	// 刷新所有本地缓冲区并收集 flushedWork 标志。
 	gcMarkDoneFlushed = 0
 	systemstack(func() {
+		// 获取当前正在运行的 goroutine
 		gp := getg().m.curg
-		// Mark the user stack as preemptible so that it may be scanned.
-		// Otherwise, our attempt to force all P's to a safepoint could
-		// result in a deadlock as we attempt to preempt a worker that's
-		// trying to preempt us (e.g. for a stack scan).
+		// 标记用户栈为可以抢占，以便它可以被扫描
 		casGToWaiting(gp, _Grunning, waitReasonGCMarkTermination)
+
+		// 遍历所有 P 线程调度器
 		forEachP(func(pp *p) {
-			// Flush the write barrier buffer, since this may add
-			// work to the gcWork.
+			// 刷新写屏障缓冲区，因为这可能会向 gcWork 添加工作。
 			wbBufFlush1(pp)
 
-			// Flush the gcWork, since this may create global work
-			// and set the flushedWork flag.
+			// 刷新 gcWork，因为这可能会创建全局工作并设置 flushedWork 标志。
 			//
-			// TODO(austin): Break up these workbufs to
-			// better distribute work.
-			pp.gcw.dispose()
-			// Collect the flushedWork flag.
+			// TODO(austin): 分解这些工作缓冲区以更好地分配工作。
+			pp.gcw.dispose() // 将所有缓存的指针返回到全局队列
+			// 收集 flushedWork 标志。
 			if pp.gcw.flushedWork {
 				atomic.Xadd(&gcMarkDoneFlushed, 1)
 				pp.gcw.flushedWork = false
 			}
 		})
+		// 转化线程状态
 		casgstatus(gp, _Gwaiting, _Grunning)
 	})
 
+	// 检查是否存在更多灰色对象
 	if gcMarkDoneFlushed != 0 {
-		// More grey objects were discovered since the
-		// previous termination check, so there may be more
-		// work to do. Keep going. It's possible the
-		// transition condition became true again during the
-		// ragged barrier, so re-check it.
+		// 继续执行。有可能在 ragged barrier 期间转换条件再次变为真，因此重新检查。
 		semrelease(&worldsema)
 		goto top
 	}
 
-	// There was no global work, no local work, and no Ps
-	// communicated work since we took markDoneSema. Therefore
-	// there are no grey objects and no more objects can be
-	// shaded. Transition to mark termination.
-	now := nanotime()
-	work.tMarkTerm = now
-	work.pauseStart = now
-	getg().m.preemptoff = "gcing"
-	systemstack(func() { stopTheWorldWithSema(stwGCMarkTerm) })
-	// The gcphase is _GCmark, it will transition to _GCmarktermination
-	// below. The important thing is that the wb remains active until
-	// all marking is complete. This includes writes made by the GC.
+	// 没有全局工作，没有本地工作，并且没有任何 P 通信了工作，自从获取了 markDoneSema。
+	// 因此没有灰色对象，也不会有更多对象被遮蔽。转换到标记终止阶段。
 
-	// There is sometimes work left over when we enter mark termination due
-	// to write barriers performed after the completion barrier above.
-	// Detect this and resume concurrent mark. This is obviously
-	// unfortunate.
-	//
-	// See issue #27993 for details.
-	//
-	// Switch to the system stack to call wbBufFlush1, though in this case
-	// it doesn't matter because we're non-preemptible anyway.
-	restart := false
+	now := nanotime()                                           // 获取当前时间
+	work.tMarkTerm = now                                        // 设置标记终止时间
+	work.pauseStart = now                                       // 设置暂停开始时间
+	getg().m.preemptoff = "gcing"                               // 设置不可抢占标志
+	systemstack(func() { stopTheWorldWithSema(stwGCMarkTerm) }) // stw 停止世界
+
+	restart := false // 初始化重启标志
 	systemstack(func() {
 		for _, p := range allp {
 			wbBufFlush1(p)
+			// 检查是否存在未完成的工作
 			if !p.gcw.empty() {
 				restart = true
 				break
 			}
 		}
 	})
+
+	// 如果存在未完成的工作，则重新开始标记阶段
 	if restart {
 		getg().m.preemptoff = ""
 		systemstack(func() {
@@ -907,34 +881,29 @@ top:
 		goto top
 	}
 
+	// gc计算起始堆栈大小
 	gcComputeStartingStackSize()
 
-	// Disable assists and background workers. We must do
-	// this before waking blocked assists.
+	// 禁用协助和后台工作者。必须在唤醒被阻塞的协助之前这样做。
 	atomic.Store(&gcBlackenEnabled, 0)
 
-	// Notify the CPU limiter that GC assists will now cease.
+	// 通知 CPU 限制器 GC 协助现在将停止。
 	gcCPULimiter.startGCTransition(false, now)
 
-	// Wake all blocked assists. These will run when we
-	// start the world again.
+	// 唤醒所有被阻塞的协助。这些将在我们启动世界时运行。
 	gcWakeAllAssists()
 
-	// Likewise, release the transition lock. Blocked
-	// workers and assists will run when we start the
-	// world again.
+	// 同样，释放转换锁。被阻塞的工作者和协助将在启动世界时运行。
 	semrelease(&work.markDoneSema)
 
-	// In STW mode, re-enable user goroutines. These will be
-	// queued to run after we start the world.
+	// 在 STW 模式下，重新启用用户 goroutines。这些将在启动世界后排队运行。
 	schedEnableUser(true)
 
-	// endCycle depends on all gcWork cache stats being flushed.
-	// The termination algorithm above ensured that up to
-	// allocations since the ragged barrier.
+	// endCycle 依赖于所有 gcWork 缓存统计信息被刷新。
+	// 上面的终止算法确保了从 ragged barrier 以来的所有分配。
 	gcController.endCycle(now, int(gomaxprocs), work.userForced)
 
-	// Perform mark termination. This will restart the world.
+	// 执行标记终止。这将重新启动世界。
 	gcMarkTermination()
 }
 

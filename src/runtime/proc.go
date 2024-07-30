@@ -1340,7 +1340,7 @@ func startTheWorldGC() {
 	semrelease(&gcsema)
 }
 
-// Holding worldsema grants an M the right to try to stop the world.
+// 持有worldsema赋予了M试图阻止世界的权利。
 var worldsema uint32 = 1
 
 // Holding gcsema grants the M the right to block a GC, and blocks

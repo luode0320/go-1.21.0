@@ -194,49 +194,59 @@ func (w *gcWork) putBatch(obj []uintptr) {
 	}
 }
 
-// tryGet dequeues a pointer for the garbage collector to trace.
+// tryGet 从垃圾回收器的工作队列中获取一个指针以供追踪。
 //
-// If there are no pointers remaining in this gcWork or in the global
-// queue, tryGet returns 0.  Note that there may still be pointers in
-// other gcWork instances or other caches.
+// 如果当前的 gcWork 或全局队列中没有剩余的指针，则 tryGet 返回 0。
+// 注意，即使返回 0，也可能存在其他 gcWork 实例或其他缓存中仍有待处理的指针。
 //
 //go:nowritebarrierrec
 func (w *gcWork) tryGet() uintptr {
+	// 获取 gcWork 结构中的工作缓冲区 wbuf
 	wbuf := w.wbuf1
+	// 如果 wbuf 为空 (nil)，则调用 init 方法初始化 gcWork，然后再次获取 wbuf
 	if wbuf == nil {
 		w.init()
 		wbuf = w.wbuf1
-		// wbuf is empty at this point.
+		// 此时 wbuf 是空的。
 	}
+
+	// 如果当前 wbuf 中没有对象，则尝试通过交换 wbuf1 和 wbuf2 来获取另一个缓冲区中的对象
 	if wbuf.nobj == 0 {
 		w.wbuf1, w.wbuf2 = w.wbuf2, w.wbuf1
 		wbuf = w.wbuf1
+
+		// 如果交换后的 wbuf 依然为空，则尝试从全局队列中获取一个缓冲区
 		if wbuf.nobj == 0 {
 			owbuf := wbuf
-			wbuf = trygetfull()
+			wbuf = trygetfull() // 尝试从全局队列中获取一个缓冲区
 			if wbuf == nil {
 				return 0
 			}
+			// 如果成功获取到非空的缓冲区，则将原来的空缓冲区 owbuf 放回空缓冲区队列中
 			putempty(owbuf)
+			// 并将新的非空缓冲区设置为 wbuf1
 			w.wbuf1 = wbuf
 		}
 	}
 
+	// 从缓冲区中取出一个对象，并将 nobj 减少 1，表示该对象已被取出
 	wbuf.nobj--
 	return wbuf.obj[wbuf.nobj]
 }
 
-// tryGetFast dequeues a pointer for the garbage collector to trace
-// if one is readily available. Otherwise it returns 0 and
-// the caller is expected to call tryGet().
+// tryGetFast 尝试快速地从垃圾回收器的工作队列中获取一个指针以供追踪。
+// 如果有立即可用的指针，则返回该指针；否则返回 0，并期望调用者随后调用 tryGet()。
 //
 //go:nowritebarrierrec
 func (w *gcWork) tryGetFast() uintptr {
+	// 获取 gcWork 结构中的工作缓冲区 wbuf
 	wbuf := w.wbuf1
+	// 如果 wbuf 为空 (nil) 或者 nobj（表示缓冲区中的对象数量）为 0，则表示缓冲区为空，没有对象可供追踪
 	if wbuf == nil || wbuf.nobj == 0 {
 		return 0
 	}
 
+	// 如果缓冲区中有对象，则从缓冲区的末尾获取一个对象，并将 nobj 减少 1，表示该对象已被取出
 	wbuf.nobj--
 	return wbuf.obj[wbuf.nobj]
 }
