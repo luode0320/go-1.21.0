@@ -106,34 +106,41 @@ func (b *wbBuf) empty() bool {
 	return b.next == uintptr(unsafe.Pointer(&b.buf[0]))
 }
 
-// getX returns space in the write barrier buffer to store X pointers.
-// getX will flush the buffer if necessary. Callers should use this as:
+// getX 返回写屏障缓冲区中用于存储 x 个指针的空间。
+// 函数为写屏障缓冲区提供了用于存储新引用的位置
+//
+// getX 必要时会刷新缓冲区。调用者应使用此函数如下：
 //
 //	buf := &getg().m.p.ptr().wbBuf
-//	p := buf.get2()
-//	p[0], p[1] = old, new
-//	... actual memory write ...
+//	p := buf.get1()
+//	p[0] = old
+//	... 实际内存写操作 ...
+//	... 完成写屏障下的缓冲区写入 ...
 //
-// The caller must ensure there are no preemption points during the
-// above sequence. There must be no preemption points while buf is in
-// use because it is a per-P resource. There must be no preemption
-// points between the buffer put and the write to memory because this
-// could allow a GC phase change, which could result in missed write
-// barriers.
+// 调用者必须确保在上述序列期间没有抢占点。当 buf 正在使用时，
+// 必须没有抢占点，因为它是每个 P 的资源。在缓冲区 put 和写入
+// 内存之间也必须没有抢占点，因为这可能会允许 GC 阶段改变，
+// 导致错过写屏障。
 //
-// getX must be nowritebarrierrec to because write barriers here would
-// corrupt the write barrier buffer. It (and everything it calls, if
-// it called anything) has to be nosplit to avoid scheduling on to a
-// different P and a different buffer.
+// getX 必须是 nowritebarrierrec，因为在写屏障中出现写屏障
+// 会导致缓冲区损坏。它（以及它调用的任何东西，如果有的话）
+// 必须是 nosplit，以避免调度到不同的 P 和不同的缓冲区。
 //
 //go:nowritebarrierrec
 //go:nosplit
 func (b *wbBuf) get1() *[1]uintptr {
+	// 如果写屏障缓冲区已满，刷新缓冲区。
 	if b.next+goarch.PtrSize > b.end {
 		wbBufFlush()
 	}
+
+	// 获取写屏障缓冲区中的下一个可用位置。
 	p := (*[1]uintptr)(unsafe.Pointer(b.next))
+
+	// 更新 next 指针，指向缓冲区中的下一个可用位置。
 	b.next += goarch.PtrSize
+
+	// 返回用于存储指针的切片。
 	return p
 }
 

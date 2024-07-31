@@ -1351,62 +1351,64 @@ var worldsema uint32 = 1
 // being changed/enabled during a GC, remove this.
 var gcsema uint32 = 1
 
-// stopTheWorldWithSema is the core implementation of stopTheWorld.
-// The caller is responsible for acquiring worldsema and disabling
-// preemption first and then should stopTheWorldWithSema on the system
-// stack:
+// stopTheWorldWithSema 是 Stop-The-World 停止世界机制的核心实现。
+// 调用者负责先获取 worldsema 互斥锁并禁用抢占，然后调用 stopTheWorldWithSema：
 //
 //	semacquire(&worldsema, 0)
-//	m.preemptoff = "reason"
+//	m.preemptoff = "原因"
 //	systemstack(stopTheWorldWithSema)
 //
-// When finished, the caller must either call startTheWorld or undo
-// these three operations separately:
+// 完成后，调用者必须要么调用 startTheWorld 或者分别撤销这三个操作：
 //
 //	m.preemptoff = ""
 //	systemstack(startTheWorldWithSema)
 //	semrelease(&worldsema)
 //
-// It is allowed to acquire worldsema once and then execute multiple
-// startTheWorldWithSema/stopTheWorldWithSema pairs.
-// Other P's are able to execute between successive calls to
-// startTheWorldWithSema and stopTheWorldWithSema.
-// Holding worldsema causes any other goroutines invoking
-// stopTheWorld to block.
+// 允许获取 worldsema 一次，然后执行多个 startTheWorldWithSema/stopTheWorldWithSema 对。
+// 其他 P 可以在连续的 startTheWorldWithSema 和 stopTheWorldWithSema 调用之间执行。
+// 持有 worldsema 会导致任何其他试图执行 stopTheWorld 的 goroutine 阻塞
 func stopTheWorldWithSema(reason stwReason) {
+	// 开始 STW 追踪。
 	if traceEnabled() {
 		traceSTWStart(reason)
 	}
 	gp := getg()
 
-	// If we hold a lock, then we won't be able to stop another M
-	// that is blocked trying to acquire the lock.
+	// 如果持有锁，则无法阻止另一个被阻塞在获取锁上的 M。
 	if gp.m.locks > 0 {
+		// 抛出错误，因为持有锁时不应该调用 stopTheWorld。
 		throw("stopTheWorld: holding locks")
 	}
 
-	lock(&sched.lock)
-	sched.stopwait = gomaxprocs
-	sched.gcwaiting.Store(true)
-	preemptall()
-	// stop current P
-	gp.m.p.ptr().status = _Pgcstop // Pgcstop is only diagnostic.
+	lock(&sched.lock)              // 获取调度器锁，以确保在 STW 期间调度器状态的一致性。
+	sched.stopwait = gomaxprocs    // 设置 stopwait 计数器为 gomaxprocs，表示需要停止的 P 的数量
+	sched.gcwaiting.Store(true)    // 设置 gcwaiting 标志，表示正在进行垃圾回收
+	preemptall()                   // 强制所有 P 预抢占，确保它们都停止
+	gp.m.p.ptr().status = _Pgcstop // 将当前 P 的状态设为 _Pgcstop，表示它已停止
 	sched.stopwait--
-	// try to retake all P's in Psyscall status
+
+	// 尝试停止所有处于 Psyscall 状态的 P。
 	for _, pp := range allp {
 		s := pp.status
+		// 遍历所有 P，如果一个 P 的状态为 _Psyscall（表示在系统调用中），则将其状态改为 _Pgcstop 已停止
 		if s == _Psyscall && atomic.Cas(&pp.status, s, _Pgcstop) {
 			if traceEnabled() {
+				// 追踪系统调用阻塞。
 				traceGoSysBlock(pp)
+				// 追踪进程停止。
 				traceProcStop(pp)
 			}
+
+			// 更新 stopwait 计数器
 			pp.syscalltick++
 			sched.stopwait--
 		}
 	}
-	// stop idle P's
+
+	// 停止空闲的 P。
 	now := nanotime()
 	for {
+		// 获取空闲的 P，并将其状态设为 _Pgcstop 已停止
 		pp, _ := pidleget(now)
 		if pp == nil {
 			break
@@ -1414,22 +1416,24 @@ func stopTheWorldWithSema(reason stwReason) {
 		pp.status = _Pgcstop
 		sched.stopwait--
 	}
+
+	// 如果 stopwait 大于 0，则表示还有 P 需要停止
 	wait := sched.stopwait > 0
 	unlock(&sched.lock)
 
-	// wait for remaining P's to stop voluntarily
+	// 如果还需要等待，则循环等待，直到所有 P 都停止
 	if wait {
 		for {
-			// wait for 100us, then try to re-preempt in case of any races
+			// 等待 100 微秒，然后尝试重新抢占以防止竞态条件。
 			if notetsleep(&sched.stopnote, 100*1000) {
 				noteclear(&sched.stopnote)
 				break
 			}
-			preemptall()
+			preemptall() // 强制所有 P 预抢占，确保它们都停止
 		}
 	}
 
-	// sanity checks
+	// 如果 stopwait 不等于 0 或者有任何 P 的状态不是 _Pgcstop，则抛出错误
 	bad := ""
 	if sched.stopwait != 0 {
 		bad = "stopTheWorld: not stopped (stopwait != 0)"
@@ -1440,18 +1444,18 @@ func stopTheWorldWithSema(reason stwReason) {
 			}
 		}
 	}
+
+	// 如果 freezing 标志为真，则表示有线程正在 panic，此时锁定 deadlock 来阻止当前线程
 	if freezing.Load() {
-		// Some other thread is panicking. This can cause the
-		// sanity checks above to fail if the panic happens in
-		// the signal handler on a stopped thread. Either way,
-		// we should halt this thread.
 		lock(&deadlock)
 		lock(&deadlock)
 	}
 	if bad != "" {
+		// 如果检查失败，抛出错误。
 		throw(bad)
 	}
 
+	// 调用 worldStopped，这通常是垃圾回收或其他需要 STW 的操作。
 	worldStopped()
 }
 
