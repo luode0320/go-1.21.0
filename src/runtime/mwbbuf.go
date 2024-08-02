@@ -32,28 +32,24 @@ import (
 // barrier flushing.
 const testSmallBuf = false
 
-// wbBuf is a per-P buffer of pointers queued by the write barrier.
-// This buffer is flushed to the GC workbufs when it fills up and on
-// various GC transitions.
+// wbBuf 是一个每-P 的缓冲区，用于存储由写屏障排队的指针。
+// 当缓冲区填满或在各种垃圾回收转换时，此缓冲区会被刷新到 GC 工作缓冲区中。
 //
-// This is closely related to a "sequential store buffer" (SSB),
-// except that SSBs are usually used for maintaining remembered sets,
-// while this is used for marking.
+// 这个结构与“顺序存储缓冲区”（SSB）密切相关，
+// 但 SSB 通常用于维护记忆集，而这个缓冲区用于标记。
 type wbBuf struct {
-	// next points to the next slot in buf. It must not be a
-	// pointer type because it can point past the end of buf and
-	// must be updated without write barriers.
+	// next 指向 buf 中的下一个可用槽位。它必须不是一个指针类型，
+	// 因为它可以指向 buf 的末尾之外，并且必须在没有写屏障的情况下更新。
 	//
-	// This is a pointer rather than an index to optimize the
-	// write barrier assembly.
+	// 之所以使用 uintptr 而不是索引，是为了优化写屏障的汇编代码。
 	next uintptr
 
-	// end points to just past the end of buf. It must not be a
-	// pointer type because it points past the end of buf and must
-	// be updated without write barriers.
+	// end 指向 buf 的末尾之后的一个位置。它必须不是一个指针类型，
+	// 因为它指向 buf 的末尾之外，并且必须在没有写屏障的情况下更新。
 	end uintptr
 
-	// buf stores a series of pointers to execute write barriers on.
+	// buf 存储了一系列指针，这些指针用于执行写屏障操作。
+	// wbBufEntries 定义了缓冲区的大小。
 	buf [wbBufEntries]uintptr
 }
 
@@ -74,34 +70,39 @@ const (
 	wbMaxEntriesPerCall = 8
 )
 
-// reset empties b by resetting its next and end pointers.
+// reset 通过重置 next 和 end 指针来清空缓冲区 b，使其准备好接收新的写屏障操作
 func (b *wbBuf) reset() {
+	// 变量用于保存缓冲区起始位置的地址
 	start := uintptr(unsafe.Pointer(&b.buf[0]))
+	// next 指针被重置为 start，即缓冲区的起始位置。
+	// 这意味着缓冲区现在准备好接收新的写屏障操作
 	b.next = start
 	if testSmallBuf {
-		// For testing, make the buffer smaller but more than
-		// 1 write barrier's worth, so it tests both the
-		// immediate flush and delayed flush cases.
+		// end 指针被设置为缓冲区中的较小位置，用于测试目的
 		b.end = uintptr(unsafe.Pointer(&b.buf[wbMaxEntriesPerCall+1]))
 	} else {
+		// end 指针被设置为缓冲区的实际末尾位置
+		// 这是通过计算 buf 数组长度乘以其元素大小，并加上 start 得到的
 		b.end = start + uintptr(len(b.buf))*unsafe.Sizeof(b.buf[0])
 	}
 
+	// 检查 next 和 end 之间的距离是否能被单个条目的大小整除。
+	// 如果不能整除，则抛出错误，指示缓冲区边界有问题
 	if (b.end-b.next)%unsafe.Sizeof(b.buf[0]) != 0 {
 		throw("bad write barrier buffer bounds")
 	}
 }
 
-// discard resets b's next pointer, but not its end pointer.
+// discard 重置缓冲区的状态，但只重置 next 指针而不重置 end 指针
 //
-// This must be nosplit because it's called by wbBufFlush.
+// 这个方法必须是 nosplit，因为它由 wbBufFlush 调用。
 //
 //go:nosplit
 func (b *wbBuf) discard() {
 	b.next = uintptr(unsafe.Pointer(&b.buf[0]))
 }
 
-// empty reports whether b contains no pointers.
+// empty 报告 B 是否不包含指针。
 func (b *wbBuf) empty() bool {
 	return b.next == uintptr(unsafe.Pointer(&b.buf[0]))
 }
@@ -174,7 +175,7 @@ func wbBufFlush() {
 
 	// 如果当前 goroutine 正在关闭 (getg().m.dying > 0)，则直接丢弃写屏障缓冲区的内容
 	if getg().m.dying > 0 {
-		// 丢弃当前 P 的写屏障缓冲区
+		// 重置缓冲区的状态，但只重置 next 指针而不重置 end 指针
 		getg().m.p.ptr().wbBuf.discard()
 		return
 	}
