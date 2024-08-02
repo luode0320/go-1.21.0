@@ -8,151 +8,137 @@ import (
 	"sync/atomic"
 )
 
-// Map is like a Go map[interface{}]interface{} but is safe for concurrent use
-// by multiple goroutines without additional locking or coordination.
-// Loads, stores, and deletes run in amortized constant time.
+// Map 并发安全的map结构体
 //
-// The Map type is specialized. Most code should use a plain Go map instead,
-// with separate locking or coordination, for better type safety and to make it
-// easier to maintain other invariants along with the map content.
+// Map 类型是专门设计的。大多数代码应该使用普通的 Go 映射，结合单独的锁或协调机制，以获得更好的类型安全性和
+// 更容易维护与映射内容相关的其他不变性。
 //
-// The Map type is optimized for two common use cases: (1) when the entry for a given
-// key is only ever written once but read many times, as in caches that only grow,
-// or (2) when multiple goroutines read, write, and overwrite entries for disjoint
-// sets of keys. In these two cases, use of a Map may significantly reduce lock
-// contention compared to a Go map paired with a separate Mutex or RWMutex.
+// Map 类型针对两种常见的使用场景进行了优化：
+// (1) 对于给定的键，其条目只被写入一次但被多次读取，如只增长的缓存，
+// (2) 多个 goroutine 对互斥的键集进行读取、写入和覆盖。
+// 在这些情况下，使用 sync.Map 可以显著减少与 Go 映射配对使用的单独 Mutex 或 RWMutex 的锁竞争。
 //
-// The zero Map is empty and ready for use. A Map must not be copied after first use.
-//
-// In the terminology of the Go memory model, Map arranges that a write operation
-// “synchronizes before” any read operation that observes the effect of the write, where
-// read and write operations are defined as follows.
-// Load, LoadAndDelete, LoadOrStore, Swap, CompareAndSwap, and CompareAndDelete
-// are read operations; Delete, LoadAndDelete, Store, and Swap are write operations;
-// LoadOrStore is a write operation when it returns loaded set to false;
-// CompareAndSwap is a write operation when it returns swapped set to true;
-// and CompareAndDelete is a write operation when it returns deleted set to true.
+// Map 的零值是空的并且准备使用。第一次使用后，不得复制 Map。
 type Map struct {
 	mu Mutex
 
-	// read contains the portion of the map's contents that are safe for
-	// concurrent access (with or without mu held).
+	// read 存仅读数据，原子操作，并发读安全，实际存储readOnly类型的数据
 	//
-	// The read field itself is always safe to load, but must only be stored with
-	// mu held.
+	// read 字段本身总是安全的，但只能在持有 mu 的情况下进行存储。
 	//
-	// Entries stored in read may be updated concurrently without mu, but updating
-	// a previously-expunged entry requires that the entry be copied to the dirty
-	// map and unexpunged with mu held.
+	// 存储在 read 中的条目可以并发更新而无需持有 mu，但如果更新之前被删除的条目，则需要将该条目复制到 dirty 映射中
+	// 并在持有 mu 的情况下取消删除。
 	read atomic.Pointer[readOnly]
 
-	// dirty contains the portion of the map's contents that require mu to be
-	// held. To ensure that the dirty map can be promoted to the read map quickly,
-	// it also includes all of the non-expunged entries in the read map.
+	// dirty 存最新写入的数据
 	//
-	// Expunged entries are not stored in the dirty map. An expunged entry in the
-	// clean map must be unexpunged and added to the dirty map before a new value
-	// can be stored to it.
+	// 删除状态的条目不会存储在 dirty 映射中。在 clean 映射中删除状态的条目必须在可以存储新值前被取消删除
+	// 并添加到 dirty 映射中。
 	//
-	// If the dirty map is nil, the next write to the map will initialize it by
-	// making a shallow copy of the clean map, omitting stale entries.
+	// 如果 dirty 映射为 nil，则下次写入映射时将会通过浅拷贝 clean 映射来初始化它，忽略过时的条目。
 	dirty map[any]*entry
 
-	// misses counts the number of loads since the read map was last updated that
-	// needed to lock mu to determine whether the key was present.
+	// misses 计数器，每次在read字段中没找所需数据时，+1
 	//
-	// Once enough misses have occurred to cover the cost of copying the dirty
-	// map, the dirty map will be promoted to the read map (in the unamended
-	// state) and the next store to the map will make a new dirty copy.
+	// 当此值到达一定阈值时，将dirty字段赋值给read
 	misses int
 }
 
-// readOnly is an immutable struct stored atomically in the Map.read field.
+// readOnly 存储mao中仅读数据的结构体
 type readOnly struct {
-	m       map[any]*entry
-	amended bool // true if the dirty map contains some key not in m.
+	m       map[any]*entry // 其底层依然是个最简单的map
+	amended bool           // 标志位，标识dirty中存储的数据是否和read中的不一样，flase 相同，true不相同
 }
 
-// expunged is an arbitrary pointer that marks entries which have been deleted
-// from the dirty map.
+// expunged 是一个任意指针，用于标记已从脏映射中删除的条目。
 var expunged = new(any)
 
-// An entry is a slot in the map corresponding to a particular key.
+// 键值对中的值结构体
 type entry struct {
-	// p points to the interface{} value stored for the entry.
-	//
-	// If p == nil, the entry has been deleted, and either m.dirty == nil or
-	// m.dirty[key] is e.
-	//
-	// If p == expunged, the entry has been deleted, m.dirty != nil, and the entry
-	// is missing from m.dirty.
-	//
-	// Otherwise, the entry is valid and recorded in m.read.m[key] and, if m.dirty
-	// != nil, in m.dirty[key].
-	//
-	// An entry can be deleted by atomic replacement with nil: when m.dirty is
-	// next created, it will atomically replace nil with expunged and leave
-	// m.dirty[key] unset.
-	//
-	// An entry's associated value can be updated by atomic replacement, provided
-	// p != expunged. If p == expunged, an entry's associated value can be updated
-	// only after first setting m.dirty[key] = e so that lookups using the dirty
-	// map find the entry.
+	// 指针，指向实际存储value值的地方
 	p atomic.Pointer[any]
 }
 
+// 创建一个新的 entry，并初始化其值。
+// 参数 i 是要存储在 entry 中的值。
 func newEntry(i any) *entry {
+	// 分配一个新的 entry 结构体。
 	e := &entry{}
+
+	// 使用原子操作将值 i 的地址存储到 entry 的 p 原子指针中。
 	e.p.Store(&i)
+
+	// 返回初始化后的 entry 指针。
 	return e
 }
 
+// 加载当前的 read-only 映射。
 func (m *Map) loadReadOnly() readOnly {
+	// 如果 read 指针不为空，则返回其指向的 read-only 映射的内容。
 	if p := m.read.Load(); p != nil {
 		return *p
 	}
+	// 如果 read 指针为空，则返回一个空的 read-only 映射。
 	return readOnly{}
 }
 
-// Load returns the value stored in the map for a key, or nil if no
-// value is present.
-// The ok result indicates whether value was found in the map.
+// Load 返回映射中存储的键对应的值，如果没有值，则返回 nil。
+// ok 结果表明值是否在映射中找到。
 func (m *Map) Load(key any) (value any, ok bool) {
+	// 加载当前的 read-only 映射。
 	read := m.loadReadOnly()
+	// 尝试从 read-only 映射中获取键对应的条目。
 	e, ok := read.m[key]
+
+	// 如果没有找到键对应的条目，并且 read-only 映射已被修改，amended标识dirty中存储的数据是否和read中的不一样
 	if !ok && read.amended {
+		// 则锁定 mu 以确保数据一致性。
 		m.mu.Lock()
-		// Avoid reporting a spurious miss if m.dirty got promoted while we were
-		// blocked on m.mu. (If further loads of the same key will not miss, it's
-		// not worth copying the dirty map for this key.)
+
+		// 再次尝试加载 read-only 映射，以防在等待锁的过程中 dirty 映射已被提升。
 		read = m.loadReadOnly()
+		// 尝试从 read-only 映射中获取键对应的条目。
 		e, ok = read.m[key]
+
+		// 如果仍然没有找到键对应的条目，并且 read-only 映射已被修改，
+		// 则从 dirty 映射中查找键对应的条目。
 		if !ok && read.amended {
 			e, ok = m.dirty[key]
-			// Regardless of whether the entry was present, record a miss: this key
-			// will take the slow path until the dirty map is promoted to the read
-			// map.
-			m.missLocked()
+			// 无论是否找到了条目，都记录一次 miss，因为这个键将会走慢路径
+			m.missLocked() // 加载值, dirty 映射被提升为 read 映射
 		}
 		m.mu.Unlock()
 	}
+
+	// 如果没有找到条目，则返回 nil 和 false。
 	if !ok {
 		return nil, false
 	}
+
+	// 加载 entry 条目中的值。
 	return e.load()
 }
 
+// load 从 entry 条目中加载值。
+// 如果条目未被删除且包含有效值，则返回值和 true。
+// 如果条目被删除或为空，则返回 nil 和 false。
 func (e *entry) load() (value any, ok bool) {
+	// 从 e.p 中加载指针。
 	p := e.p.Load()
+
+	// 如果指针为空或者等于 expunged 常量，则表示条目被删除或未分配。
 	if p == nil || p == expunged {
 		return nil, false
 	}
+
+	// 解引用指针以获取条目中的值。
 	return *p, true
 }
 
-// Store sets the value for a key.
+// Store 设置键对应的值。
+// 这个方法通过调用 Swap 方法来实现。
 func (m *Map) Store(key, value any) {
-	_, _ = m.Swap(key, value)
+	_, _ = m.Swap(key, value) // 调用 Swap 方法存储键值
 }
 
 // tryCompareAndSwap compare the entry with the given old value and swaps
@@ -267,34 +253,46 @@ func (e *entry) tryLoadOrStore(i any) (actual any, loaded, ok bool) {
 	}
 }
 
-// LoadAndDelete deletes the value for a key, returning the previous value if any.
-// The loaded result reports whether the key was present.
+// LoadAndDelete 删除键对应的值，并返回之前的值（如果有）。
+// loaded 结果报告键是否存在于映射中。
 func (m *Map) LoadAndDelete(key any) (value any, loaded bool) {
+	// 加载当前的 read-only 映射。
 	read := m.loadReadOnly()
+	// 尝试从 read-only 映射中获取键对应的条目。
 	e, ok := read.m[key]
+
+	// 如果没有找到键对应的条目，并且 read-only 映射已被修改，则锁定 mu 以确保数据一致性。
 	if !ok && read.amended {
 		m.mu.Lock()
+		// 再次尝试加载 read-only 映射，以防在等待锁的过程中 dirty 映射已被提升。
 		read = m.loadReadOnly()
 		e, ok = read.m[key]
+
+		// 如果仍然没有找到键对应的条目，并且 read-only 映射已被修改，则从 dirty 映射中查找键对应的条目。
 		if !ok && read.amended {
 			e, ok = m.dirty[key]
+			// 从 dirty 映射中删除键。
 			delete(m.dirty, key)
-			// Regardless of whether the entry was present, record a miss: this key
-			// will take the slow path until the dirty map is promoted to the read
-			// map.
+			// 无论是否找到了条目，都记录一次 miss，因为这个键将会走慢路径
+			// 直到 dirty 映射被提升为 read 映射。
 			m.missLocked()
 		}
+		// 解锁 mu。
 		m.mu.Unlock()
 	}
+
+	// 如果找到了条目，则删除条目并返回之前的值。
 	if ok {
-		return e.delete()
+		return e.delete() // 将值所在的指针, 修改为nil
 	}
+	// 如果没有找到条目，则返回 nil 和 false。
 	return nil, false
 }
 
-// Delete deletes the value for a key.
+// Delete 删除键对应的值。
+// 这个方法通过调用 LoadAndDelete 方法来实现。
 func (m *Map) Delete(key any) {
-	m.LoadAndDelete(key)
+	m.LoadAndDelete(key) // 调用 LoadAndDelete 方法，但忽略其返回结果。
 }
 
 func (e *entry) delete() (value any, ok bool) {
@@ -309,62 +307,83 @@ func (e *entry) delete() (value any, ok bool) {
 	}
 }
 
-// trySwap swaps a value if the entry has not been expunged.
+// 尝试交换条目中的值，前提是该条目未被删除。
 //
-// If the entry is expunged, trySwap returns false and leaves the entry
-// unchanged.
+// 如果条目已被删除，则 `trySwap` 返回 false 并且不改变条目。
 func (e *entry) trySwap(i *any) (*any, bool) {
+	// 循环尝试交换值，直到成功或发现条目已被删除。
 	for {
+		// 加载当前条目中的值指针。
 		p := e.p.Load()
+
+		// 如果条目已被删除，则返回 nil 和 false。
 		if p == expunged {
 			return nil, false
 		}
+
+		// 尝试原子地交换值。
 		if e.p.CompareAndSwap(p, i) {
 			return p, true
 		}
 	}
 }
 
-// Swap swaps the value for a key and returns the previous value if any.
-// The loaded result reports whether the key was present.
+// Swap 交换键对应的值，并返回之前的值（如果有）。
+// loaded 结果报告键是否存在于映射中。
 func (m *Map) Swap(key, value any) (previous any, loaded bool) {
+	// 加载当前的 read-only 映射。
 	read := m.loadReadOnly()
+	// 尝试从 read-only 映射中获取键对应的条目。
 	if e, ok := read.m[key]; ok {
+		// 如果条目存在，则尝试交换值。
 		if v, ok := e.trySwap(&value); ok {
 			if v == nil {
 				return nil, false
 			}
+			// 如果交换成功，则返回之前的值。
 			return *v, true
 		}
 	}
 
+	// 如果条目不存在或者交换失败，则锁定 mu 以确保数据一致性。
 	m.mu.Lock()
+
+	// 再次加载当前的 read-only 映射。
 	read = m.loadReadOnly()
+	// 再次尝试从 read-only 映射中获取键对应的条目。
 	if e, ok := read.m[key]; ok {
+		// 如果条目存在，则取消删除状态。
 		if e.unexpungeLocked() {
-			// The entry was previously expunged, which implies that there is a
-			// non-nil dirty map and this entry is not in it.
+			// 如果条目之前被删除，则确保 dirty 映射存在，并将条目添加到 dirty 映射中。
 			m.dirty[key] = e
 		}
+		// 交换值。
 		if v := e.swapLocked(&value); v != nil {
+			// 如果交换成功，则返回之前的值。
 			loaded = true
 			previous = *v
 		}
 	} else if e, ok := m.dirty[key]; ok {
+		// 如果条目在 dirty 映射中存在，则交换值。
 		if v := e.swapLocked(&value); v != nil {
+			// 如果交换成功，则返回之前的值。
 			loaded = true
 			previous = *v
 		}
 	} else {
+		// 如果 read-only 映射没有被修改，则表示这是第一次向 dirty 映射中添加新的键。
 		if !read.amended {
-			// We're adding the first new key to the dirty map.
-			// Make sure it is allocated and mark the read-only map as incomplete.
-			m.dirtyLocked()
+			// 确保 dirty 映射被分配，并标记 read-only 映射为不一致。
+			m.dirtyLocked() // 第一次向 dirty 映射中添加新的键。
 			m.read.Store(&readOnly{m: read.m, amended: true})
 		}
-		m.dirty[key] = newEntry(value)
+		m.dirty[key] = newEntry(value) // 向 dirty 映射中添加新的条目。
 	}
+
+	// 解锁 mu。
 	m.mu.Unlock()
+
+	// 返回之前的值和是否找到键的标志。
 	return previous, loaded
 }
 
@@ -435,31 +454,28 @@ func (m *Map) CompareAndDelete(key, old any) (deleted bool) {
 	return false
 }
 
-// Range calls f sequentially for each key and value present in the map.
-// If f returns false, range stops the iteration.
+// Range 依次为映射中存在的每个键和值调用函数 f。
+// 如果 f 返回 false，则停止遍历。
 //
-// Range does not necessarily correspond to any consistent snapshot of the Map's
-// contents: no key will be visited more than once, but if the value for any key
-// is stored or deleted concurrently (including by f), Range may reflect any
-// mapping for that key from any point during the Range call. Range does not
-// block other methods on the receiver; even f itself may call any method on m.
+// Range 不一定会对应映射的任何一致快照：
 //
-// Range may be O(N) with the number of elements in the map even if f returns
-// false after a constant number of calls.
+//	每个键不会被访问超过一次，但如果任一键的值被并发地存储或删除（包括由 f 执行）
+//	Range 可能反映该键在 Range 调用期间的任意时刻的映射。
+//	Range 不会阻止对接收者的其他方法的调用；甚至 f 本身也可以调用 m 上的任何方法。
+//
+// 即使 f 在常数次数的调用后返回 false，Range 也可能是 O(N) 的，其中 N 是映射中的元素数量。
 func (m *Map) Range(f func(key, value any) bool) {
-	// We need to be able to iterate over all of the keys that were already
-	// present at the start of the call to Range.
-	// If read.amended is false, then read.m satisfies that property without
-	// requiring us to hold m.mu for a long time.
 	read := m.loadReadOnly()
+
+	// 如果读的map和写的map不一致, 需要特殊处理
 	if read.amended {
-		// m.dirty contains keys not in read.m. Fortunately, Range is already O(N)
-		// (assuming the caller does not break out early), so a call to Range
-		// amortizes an entire copy of the map: we can promote the dirty copy
-		// immediately!
 		m.mu.Lock()
+
+		// 再次确认, 如果读的map和写的map不一致, 需要特殊处理
 		read = m.loadReadOnly()
 		if read.amended {
+			// 将 dirty 映射提升为 read 映射。
+			// 同步写的map到读的map
 			read = readOnly{m: m.dirty}
 			m.read.Store(&read)
 			m.dirty = nil
@@ -468,35 +484,58 @@ func (m *Map) Range(f func(key, value any) bool) {
 		m.mu.Unlock()
 	}
 
+	// 遍历 read 映射中的所有条目。
 	for k, e := range read.m {
+		// 加载条目中的值。
 		v, ok := e.load()
 		if !ok {
+			// 如果条目已被删除，则跳过本次迭代。
 			continue
 		}
+
+		// 调用函数 f，传递键和值。
 		if !f(k, v) {
+			// 如果 f 返回 false，则停止遍历。
 			break
 		}
 	}
 }
 
+// 在持有锁的情况下处理 miss。
+// 当读取操作未能直接从 read 映射中找到键对应的值时调用此方法。
+// 如果 miss 的数量达到一定阈值，则将 dirty 映射提升为 read 映射。
 func (m *Map) missLocked() {
+	// 增加 miss 计数器。
 	m.misses++
+	// 如果 miss 的数量小于 dirty 映射中的条目数量，则直接返回。
 	if m.misses < len(m.dirty) {
 		return
 	}
+
+	// 将 dirty 映射提升为 read 映射。
 	m.read.Store(&readOnly{m: m.dirty})
+	// 清空 dirty 映射。
 	m.dirty = nil
+	// 重置 miss 计数器。
 	m.misses = 0
 }
 
+// 在持有锁的情况下初始化 dirty 映射。
+// 如果 dirty 映射尚未初始化，则根据 read-only 映射的内容创建一个新的 dirty 映射。
 func (m *Map) dirtyLocked() {
+	// 如果 dirty 映射已经存在，则直接返回。
 	if m.dirty != nil {
 		return
 	}
 
+	// 加载当前的 read-only 映射。
 	read := m.loadReadOnly()
+	// 创建一个新的 dirty 映射，并初始化其容量为 read-only 映射的大小。
 	m.dirty = make(map[any]*entry, len(read.m))
+
+	// 遍历 read-only 映射中的所有条目。
 	for k, e := range read.m {
+		// 如果条目未被删除，则将其添加到 dirty 映射中。
 		if !e.tryExpungeLocked() {
 			m.dirty[k] = e
 		}
