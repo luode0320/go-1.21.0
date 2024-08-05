@@ -2947,8 +2947,7 @@ func execute(gp *g, inheritTime bool) {
 		traceGoStart()
 	}
 
-	// 将控制权交给 gp 的调度状态，开始执行 gp, 实际运行 goroutine。
-	gogo(&gp.sched)
+	gogo(&gp.sched) // 将控制权交给 gp 的调度状态，开始执行 gp, 实际运行 goroutine。
 }
 
 // 查找一个可运行的 goroutine 来执行。
@@ -4061,9 +4060,8 @@ func goexit0(gp *g) {
 	gfput(pp, gp)
 	// 如果 gp 锁定了线程，则需要特殊处理。
 	if locked {
-		// 如果不是 Plan9 系统，返回到 mstart，释放 P 并退出线程。
 		if GOOS != "plan9" {
-			gogo(&mp.g0.sched)
+			gogo(&mp.g0.sched) // 如果不是 Plan9 系统，返回到 mstart，释放 P 并退出线程。
 		} else {
 			// 对于 Plan9，清除 lockedExt 标志，可能重新使用此线程。
 			mp.lockedExt = 0

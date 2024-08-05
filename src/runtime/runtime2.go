@@ -870,57 +870,48 @@ func extendRandom(r []byte, n int) {
 	}
 }
 
-// A _defer holds an entry on the list of deferred calls.
-// If you add a field here, add code to clear it in deferProcStack.
-// This struct must match the code in cmd/compile/internal/ssagen/ssa.go:deferstruct
-// and cmd/compile/internal/ssagen/ssa.go:(*state).call.
-// Some defers will be allocated on the stack and some on the heap.
-// All defers are logically part of the stack, so write barriers to
-// initialize them are not required. All defers must be manually scanned,
-// and for heap defers, marked.
+// _defer 结构体用来存储一个被延迟调用的函数条目。
+// 如果在这个结构体中添加新的字段，请确保在 deferProcStack 函数中也添加相应的清理代码。
+// 这个结构体必须与 cmd/compile/internal/ssagen/ssa.go 文件中的 deferstruct 和 state.call 函数保持一致。
+// 一些 _defer 实例会被分配在栈上，而另一些则会分配在堆上。
+// 所有的 _defer 实例都属于栈的一部分，因此不需要写屏障来初始化它们。
+// 所有的 _defer 实例都需要手动扫描，并且对于堆上的 _defer 实例，需要进行标记。
 type _defer struct {
-	started bool
-	heap    bool
-	// openDefer indicates that this _defer is for a frame with open-coded
-	// defers. We have only one defer record for the entire frame (which may
-	// currently have 0, 1, or more defers active).
-	openDefer bool
-	sp        uintptr // sp at time of defer
-	pc        uintptr // pc at time of defer
-	fn        func()  // can be nil for open-coded defers
-	_panic    *_panic // panic that is running defer
-	link      *_defer // next defer on G; can point to either heap or stack!
+	started bool // 表示这个延迟调用是否已经开始执行。当延迟调用被触发时，此字段会被设置为 true
+	heap    bool // 表示 _defer 结构体是否分配在堆上。这有助于运行时确定何时需要进行垃圾回收。
+	// 表示这个 _defer 是为包含开放编码（即内联编码）的延迟调用的函数帧准备的。
+	// 我们只为整个帧保留一个 _defer 记录（该帧可能当前有 0 个、1 个或者多个活跃的延迟调用）。
+	openDefer bool    // 表示这个 _defer 结构体是否对应于一个具有内联编码的延迟调用的函数帧。
+	sp        uintptr // 当延迟调用被创建时的栈指针（stack pointer）。这对于恢复现场非常重要。
+	pc        uintptr // 当延迟调用被创建时的程序计数器（program counter），也就是延迟调用点的地址。
+	fn        func()  // 要延迟执行的函数。如果使用了内联编码的延迟调用，则该字段可能为 nil。
+	_panic    *_panic // 当前正在执行延迟调用的 panic 结构体。如果是 nil，则表示没有正在进行的 panic。
+	link      *_defer // 指向同一个 goroutine 中下一个 _defer 结构体的指针；这形成了一个链表，使得运行时能够按正确的顺序执行延迟调用。
 
-	// If openDefer is true, the fields below record values about the stack
-	// frame and associated function that has the open-coded defer(s). sp
-	// above will be the sp for the frame, and pc will be address of the
-	// deferreturn call in the function.
-	fd   unsafe.Pointer // funcdata for the function associated with the frame
-	varp uintptr        // value of varp for the stack frame
-	// framepc is the current pc associated with the stack frame. Together,
-	// with sp above (which is the sp associated with the stack frame),
-	// framepc/sp can be used as pc/sp pair to continue a stack trace via
-	// gentraceback().
+	// 如果 openDefer 为 true，则下面的字段记录了与包含开放编码延迟调用的栈帧及其关联函数相关的值。
+	fd   unsafe.Pointer // funcdata 指针，指向与该帧关联的函数的函数数据。
+	varp uintptr        // varp 的值，varp 是栈帧中的一个指针，指向函数局部变量的开始。
+	// 是与栈帧关联的当前程序计数器（pc）。
+	// 通过 framepc/sp 可以继续追踪栈帧，以完成栈跟踪。
 	framepc uintptr
 }
 
-// A _panic holds information about an active panic.
+// _panic 结构体用来存储关于一个活跃的 panic 的信息。
 //
-// A _panic value must only ever live on the stack.
+// _panic 值只能存在于栈上。
 //
-// The argp and link fields are stack pointers, but don't need special
-// handling during stack growth: because they are pointer-typed and
-// _panic values only live on the stack, regular stack pointer
-// adjustment takes care of them.
+// argp 和 link 字段是栈指针，但是它们不需要特别的处理来进行栈增长：
+// 因为它们是指针类型，并且 _panic 值只存在于栈上，
+// 所以常规的栈指针调整就能正确处理它们。
 type _panic struct {
-	argp      unsafe.Pointer // pointer to arguments of deferred call run during panic; cannot move - known to liblink
-	arg       any            // argument to panic
-	link      *_panic        // link to earlier panic
-	pc        uintptr        // where to return to in runtime if this panic is bypassed
-	sp        unsafe.Pointer // where to return to in runtime if this panic is bypassed
-	recovered bool           // whether this panic is over
-	aborted   bool           // the panic was aborted
-	goexit    bool
+	argp      unsafe.Pointer // 当 panic 发生时，此指针指向延迟调用的参数。
+	arg       any            // 这个参数通常是一个错误或异常对象，用来描述发生了什么问题。
+	link      *_panic        // 指向前一个 panic 的链接,这形成了一条链表，用来记录在当前 goroutine 中发生的 panic 序列。
+	pc        uintptr        // 表示如果此 panic 被绕过（例如通过 recover），则应该返回到 runtime 中的位置。
+	sp        unsafe.Pointer // 如果此 panic 被绕过（例如通过 recover），则返回到 runtime 的栈指针
+	recovered bool           // 表示此 panic 是否已经被处理。如果 recover 成功，则将此字段设置为 true。
+	aborted   bool           // 表示此 panic 是否被中止。如果在 panic 处理过程中发生了其他 panic，那么当前的 panic 可能会被中止。
+	goexit    bool           // 如果一个 panic 没有被捕获，并且一直传播到了 goroutine 的顶层，那么这个 goroutine 将会退出。
 }
 
 // ancestorInfo records details of where a goroutine was started.

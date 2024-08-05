@@ -266,144 +266,175 @@ func panicmemAddr(addr uintptr) {
 	panic(errorAddressString{msg: "invalid memory address or nil pointer dereference", addr: addr})
 }
 
-// Create a new deferred function fn, which has no arguments and results.
-// The compiler turns a defer statement into a call to this.
+// 创建一个新的延迟函数 fn，该函数没有参数和结果。
+// 编译器将 defer 语句转换为对此函数的调用。
 func deferproc(fn func()) {
+	// 获取当前 goroutine 的 g 结构体。
 	gp := getg()
+
+	// 如果当前 goroutine 不是当前正在运行的 goroutine，则抛出异常。
 	if gp.m.curg != gp {
-		// go code on the system stack can't defer
 		throw("defer on system stack")
 	}
 
-	d := newdefer()
+	d := newdefer() // 创建一个新的延迟调用记录。
+
+	// 检查新创建的延迟调用记录是否意外地包含了非 nil 的 panic 结构体。
 	if d._panic != nil {
 		throw("deferproc: d.panic != nil after newdefer")
 	}
-	d.link = gp._defer
-	gp._defer = d
-	d.fn = fn
-	d.pc = getcallerpc()
-	// We must not be preempted between calling getcallersp and
-	// storing it to d.sp because getcallersp's result is a
-	// uintptr stack pointer.
+
+	d.link = gp._defer   // 将新创建的延迟调用记录链接到当前 goroutine 的延迟调用链表。
+	gp._defer = d        // 更新当前 goroutine 的延迟调用链表头。
+	d.fn = fn            // 设置延迟调用记录中的函数。
+	d.pc = getcallerpc() // 获取调用 deferproc 的函数的程序计数器。
+
+	// 获取调用 deferproc 的函数的栈指针。
+	// 必须在调用 getcallersp 和存储结果到 d.sp 之间避免抢占，
+	// 因为 getcallersp 的结果是一个 uintptr 类型的栈指针。
 	d.sp = getcallersp()
 
-	// deferproc returns 0 normally.
-	// a deferred func that stops a panic
-	// makes the deferproc return 1.
-	// the code the compiler generates always
-	// checks the return value and jumps to the
-	// end of the function if deferproc returns != 0.
+	// 正常情况下是返回0，然后执行defer后面的逻辑，最后在f中执行return时调用deferreturn
+	// 异常情况下（panic-recover）返回1，直接执行deferreturn
 	return0()
-	// No code can go here - the C return register has
-	// been set and must not be clobbered.
+	// 此处不能有代码，因为 C 语言的返回寄存器已经被设置，不能被覆盖
 }
 
-// deferprocStack queues a new deferred function with a defer record on the stack.
-// The defer record must have its fn field initialized.
-// All other fields can contain junk.
-// Nosplit because of the uninitialized pointer fields on the stack.
+// 在栈上排队一个新延迟执行的函数。
+// 该函数接收一个已经在栈上分配好的 _defer 结构体作为参数。
+// 参数 d 的 fn 字段应该已经被初始化。
+// 使用 nosplit 标记是因为栈上的指针字段未初始化。
 //
 //go:nosplit
 func deferprocStack(d *_defer) {
+	// 获取当前 goroutine 的状态信息。
 	gp := getg()
+
+	// 如果当前 goroutine 不是正在执行的 goroutine，则抛出异常。
+	// 这意味着不能在系统栈上进行延迟调用。
 	if gp.m.curg != gp {
-		// go code on the system stack can't defer
 		throw("defer on system stack")
 	}
-	// fn is already set.
-	// The other fields are junk on entry to deferprocStack and
-	// are initialized here.
-	d.started = false
-	d.heap = false
-	d.openDefer = false
-	d.sp = getcallersp()
-	d.pc = getcallerpc()
-	d.framepc = 0
-	d.varp = 0
-	// The lines below implement:
-	//   d.panic = nil
-	//   d.fd = nil
-	//   d.link = gp._defer
-	//   gp._defer = d
-	// But without write barriers. The first three are writes to
-	// the stack so they don't need a write barrier, and furthermore
-	// are to uninitialized memory, so they must not use a write barrier.
-	// The fourth write does not require a write barrier because we
-	// explicitly mark all the defer structures, so we don't need to
-	// keep track of pointers to them with a write barrier.
+
+	// 初始化 _defer 结构体中的一些字段。
+	// 注意：fn 字段已经由调用者初始化。
+	d.started = false    // 表示延迟调用是否已经开始执行。
+	d.heap = false       // 标记该结构体是在栈上分配的。
+	d.openDefer = false  // 表示这不是一个开放的延迟调用。
+	d.sp = getcallersp() // 获取调用者的栈指针。
+	d.pc = getcallerpc() // 获取调用者的程序计数器。
+	d.framepc = 0        // 调用者函数的帧地址（对于栈上分配不重要）。
+	d.varp = 0           // 变量的地址（对于栈上分配不重要）。
+
+	// 下面的代码使用了 *(*uintptr) 指针来间接修改结构体中的字段。
+	// 这是为了避免触发写屏障(write barrier)，因为这些字段都位于栈上，
+	// 并且在进入 deferprocStack 时还未经初始化。
+
+	// 初始化 _defer 结构体中的 panic 字段。
+	// 由于这是栈上的数据，无需触发写屏障。
 	*(*uintptr)(unsafe.Pointer(&d._panic)) = 0
+
+	// 初始化 _defer 结构体中的 fd 字段（用于保存文件描述符等信息）。
+	// 由于这是栈上的数据，无需触发写屏障。
 	*(*uintptr)(unsafe.Pointer(&d.fd)) = 0
+
+	// 初始化 _defer 结构体中的 link 字段，指向当前 goroutine 的 _defer 链表。
+	// 由于这是栈上的数据，无需触发写屏障。
 	*(*uintptr)(unsafe.Pointer(&d.link)) = uintptr(unsafe.Pointer(gp._defer))
+
+	// 更新当前 goroutine 的 _defer 链表，将新创建的 _defer 结构体添加进去。
+	// 由于我们显式地标记所有 _defer 结构体，因此无需触发写屏障。
 	*(*uintptr)(unsafe.Pointer(&gp._defer)) = uintptr(unsafe.Pointer(d))
 
+	// 返回0() 是一个空操作，用于确保 C 语言返回寄存器被设置，防止之后的代码覆盖它。
+	// 注意：这里不允许有任何其他代码，因为 C 语言返回寄存器已经被设置，不能被破坏。
 	return0()
-	// No code can go here - the C return register has
-	// been set and must not be clobbered.
+	// 此处不能有代码，因为 C 语言的返回寄存器已经被设置，不能被覆盖
 }
 
 // Each P holds a pool for defers.
 
-// Allocate a Defer, usually using per-P pool.
-// Each defer must be released with freedefer.  The defer is not
-// added to any defer chain yet.
+// 分配一个 Defer 结构体，通常使用每个 P 的局部缓存池。
+// 每个分配的 defer 都必须通过 freedefer 进行释放。此时 defer 并未加入任何 defer 链表中。
 func newdefer() *_defer {
 	var d *_defer
-	mp := acquirem()
-	pp := mp.p.ptr()
+	mp := acquirem() // 获取一个 m 结构体用于访问 P 结构体。
+	pp := mp.p.ptr() // 获取当前 m 结构体关联的 P 结构体。
+
+	// 如果当前 P 的 defer 缓存池为空并且调度器的 defer 缓存池不为空，则从调度器的 defer 缓存池获取 defer。
 	if len(pp.deferpool) == 0 && sched.deferpool != nil {
+		// 加锁以保护共享 defer 缓存池。
 		lock(&sched.deferlock)
+
+		// 当前 P 的 defer 缓存池数量少于其容量的一半时，尝试从调度器的 defer 缓存池中取出 defer。
 		for len(pp.deferpool) < cap(pp.deferpool)/2 && sched.deferpool != nil {
 			d := sched.deferpool
-			sched.deferpool = d.link
-			d.link = nil
-			pp.deferpool = append(pp.deferpool, d)
+			sched.deferpool = d.link               // 将调度器 defer 缓存池的头部指向下一个 defer。
+			d.link = nil                           // 将取出的 defer 的 link 设为 nil，表示它不再链接到任何链表。
+			pp.deferpool = append(pp.deferpool, d) // 将取出的 defer 加入当前 P 的 defer 缓存池。
 		}
+
+		// 解锁。
 		unlock(&sched.deferlock)
 	}
+
+	// 从当前 P 的 defer 缓存池中取出一个 defer。
 	if n := len(pp.deferpool); n > 0 {
 		d = pp.deferpool[n-1]
 		pp.deferpool[n-1] = nil
+		// 从 defer 缓存池中移除最后一个 defer。
 		pp.deferpool = pp.deferpool[:n-1]
 	}
-	releasem(mp)
-	mp, pp = nil, nil
 
+	releasem(mp)      // 释放 m 结构体以便其他 goroutine 可以使用。
+	mp, pp = nil, nil // 清除对 m 和 p 的引用以避免内存泄漏。
+
+	// 如果当前 P 的 defer 缓存池为空，则分配一个新的 defer。
 	if d == nil {
 		// Allocate new defer.
 		d = new(_defer)
 	}
+	// 标记 defer 是从堆中分配的（即使是从缓存池获取的）。
 	d.heap = true
+	// 返回分配好的 defer。
 	return d
 }
 
-// Free the given defer.
-// The defer cannot be used after this call.
+// 释放给定的延迟调用记录。
+// 释放后，该延迟调用记录不可再使用。
 //
-// This is nosplit because the incoming defer is in a perilous state.
-// It's not on any defer list, so stack copying won't adjust stack
-// pointers in it (namely, d.link). Hence, if we were to copy the
-// stack, d could then contain a stale pointer.
+// 这个函数被标记为 nosplit，因为传入的延迟调用记录处于危险状态。
+// 它不在任何延迟调用列表上，因此栈复制不会调整其中的栈指针（例如 d.link）。
+// 因此，如果我们复制栈，则 d 可能包含过时的指针。
 //
 //go:nosplit
 func freedefer(d *_defer) {
+	// 将延迟调用记录的链接字段设置为 nil，以避免引用循环。
 	d.link = nil
-	// After this point we can copy the stack.
 
+	// 从这里开始我们可以复制栈。
+
+	// 释放与该延迟调用相关的 panic 结构体。
 	if d._panic != nil {
 		freedeferpanic()
 	}
+	// 释放与该延迟调用相关的函数。
 	if d.fn != nil {
 		freedeferfn()
 	}
+	// 如果该延迟调用记录不是分配在堆上的，则直接返回。
 	if !d.heap {
 		return
 	}
 
+	// 获取一个 m 结构体，用于访问 P 结构体。
 	mp := acquirem()
+	// 获取当前 P 结构体的指针。
 	pp := mp.p.ptr()
+
+	// 如果 P 结构体的延迟调用池已满，则将一半的本地缓存转移到中心缓存。
 	if len(pp.deferpool) == cap(pp.deferpool) {
-		// Transfer half of local cache to the central cache.
+		// 将一半的本地缓存转移到中央缓存。
 		var first, last *_defer
 		for len(pp.deferpool) > cap(pp.deferpool)/2 {
 			n := len(pp.deferpool)
@@ -417,17 +448,27 @@ func freedefer(d *_defer) {
 			}
 			last = d
 		}
+		// 锁定延迟调用池的互斥锁。
 		lock(&sched.deferlock)
+
+		// 将本地缓存的延迟调用记录连接到中心缓存。
 		last.link = sched.deferpool
 		sched.deferpool = first
+
+		// 解锁延迟调用池的互斥锁。
 		unlock(&sched.deferlock)
 	}
 
+	// 清空延迟调用记录的内容。
 	*d = _defer{}
 
+	// 将延迟调用记录添加回 P 结构体的延迟调用池。
 	pp.deferpool = append(pp.deferpool, d)
 
+	// 释放 m 结构体。
 	releasem(mp)
+
+	// 释放局部变量，避免内存泄漏。
 	mp, pp = nil, nil
 }
 
@@ -443,38 +484,52 @@ func freedeferfn() {
 	throw("freedefer with d.fn != nil")
 }
 
-// deferreturn runs deferred functions for the caller's frame.
-// The compiler inserts a call to this at the end of any
-// function which calls defer.
+// 为调用者的帧运行延迟调用的函数。
+// 编译器会在任何调用了 defer 的函数末尾插入对该函数的调用。
 func deferreturn() {
+	// 获取当前 goroutine 的 g 结构体。
 	gp := getg()
+
+	// 循环处理延迟调用。
 	for {
+		// 获取当前 goroutine 的第一个延迟调用记录。
 		d := gp._defer
+		// 如果延迟调用记录为空，则结束循环。
 		if d == nil {
 			return
 		}
+
+		// 获取调用者函数的栈指针。
 		sp := getcallersp()
+
+		// 如果延迟调用记录中的栈指针与当前函数的栈指针不匹配，则说明当前延迟调用记录不属于当前函数，因此结束循环
 		if d.sp != sp {
 			return
 		}
+
+		// 如果延迟调用记录使用了开放编码（即内联编码）。
 		if d.openDefer {
+			// 执行开放编码的延迟调用。
 			done := runOpenDeferFrame(d)
+			// 如果没有完成所有开放编码的延迟调用，则抛出异常。
 			if !done {
 				throw("unfinished open-coded defers in deferreturn")
 			}
+			// 更新当前 goroutine 的延迟调用记录链表。
 			gp._defer = d.link
+			// 释放当前延迟调用记录。
 			freedefer(d)
-			// If this frame uses open defers, then this
-			// must be the only defer record for the
-			// frame, so we can just return.
+			// 如果该帧使用开放编码的延迟调用，则这必须是该帧唯一的延迟调用记录，
+			// 因此可以结束循环。
 			return
 		}
 
-		fn := d.fn
-		d.fn = nil
-		gp._defer = d.link
-		freedefer(d)
-		fn()
+		// 执行延迟调用。
+		fn := d.fn         // 获取要执行的函数。
+		d.fn = nil         // 清除函数指针，避免重复执行。
+		gp._defer = d.link // 更新当前 goroutine 的延迟调用记录链表。使其指向下一个延迟调用记录
+		freedefer(d)       // 释放当前延迟调用记录。释放后，该延迟调用记录不可再使用
+		fn()               // 执行延迟调用函数。
 	}
 }
 
@@ -742,37 +797,58 @@ func readvarintUnsafe(fd unsafe.Pointer) (uint32, unsafe.Pointer) {
 	}
 }
 
-// runOpenDeferFrame runs the active open-coded defers in the frame specified by
-// d. It normally processes all active defers in the frame, but stops immediately
-// if a defer does a successful recover. It returns true if there are no
-// remaining defers to run in the frame.
+// runOpenDeferFrame 运行指定帧中的活动开放编码(defer)的延迟调用。
+// 它通常会处理帧中所有活动的延迟调用，但如果某个延迟调用成功地捕获了一个 panic，则会立即停止。
+// 如果帧中没有剩余的延迟调用需要运行，则返回 true。
 func runOpenDeferFrame(d *_defer) bool {
-	done := true
-	fd := d.fd
+	var done = true // 默认情况下认为所有延迟调用都已经处理完毕。
+	fd := d.fd      // 获取函数数据指针。
 
+	// 读取延迟调用位图的偏移量以及延迟调用的数量。
 	deferBitsOffset, fd := readvarintUnsafe(fd)
 	nDefers, fd := readvarintUnsafe(fd)
+
+	// 从 varp 指针减去偏移量得到延迟调用位图。
 	deferBits := *(*uint8)(unsafe.Pointer(d.varp - uintptr(deferBitsOffset)))
 
+	// 逆序遍历延迟调用位图，从最高位到最低位。
 	for i := int(nDefers) - 1; i >= 0; i-- {
-		// read the funcdata info for this defer
+		// 读取当前延迟调用的闭包偏移量。
 		var closureOffset uint32
 		closureOffset, fd = readvarintUnsafe(fd)
+
+		// 如果当前位为 0，则跳过此延迟调用。
 		if deferBits&(1<<i) == 0 {
 			continue
 		}
+
+		// 获取当前延迟调用的闭包。
 		closure := *(*func())(unsafe.Pointer(d.varp - uintptr(closureOffset)))
+
+		// 设置当前延迟调用的函数。
 		d.fn = closure
+
+		// 清除已执行的延迟调用位。
 		deferBits = deferBits &^ (1 << i)
+
+		// 更新延迟调用位图。
 		*(*uint8)(unsafe.Pointer(d.varp - uintptr(deferBitsOffset))) = deferBits
+
+		// 获取当前 panic 结构体。
 		p := d._panic
-		// Call the defer. Note that this can change d.varp if
-		// the stack moves.
+
+		// 调用延迟调用函数。注意这可能会改变 d.varp 如果栈发生了移动。
 		deferCallSave(p, d.fn)
+
+		// 检查是否发生了 panic 被中止的情况。
 		if p != nil && p.aborted {
 			break
 		}
+
+		// 清除延迟调用函数。
 		d.fn = nil
+
+		// 如果延迟调用函数成功地捕获了一个 panic，则检查是否还有剩余的延迟调用。
 		if d._panic != nil && d._panic.recovered {
 			done = deferBits == 0
 			break
@@ -822,17 +898,24 @@ func (*PanicNilError) RuntimeError() {}
 
 var panicnil = &godebugInc{name: "panicnil"}
 
-// The implementation of the predeclared function panic.
+// 函数实现了预声明的 panic 函数。
+// 当一个 goroutine 中发生 panic 时，这个函数会被调用。
 func gopanic(e any) {
+	// 如果 panic 的原因 e 为 nil，则根据调试标志决定是否使用默认 PanicNilError。
 	if e == nil {
 		if debug.panicnil.Load() != 1 {
 			e = new(PanicNilError)
 		} else {
+			// 如果设置了不使用默认 PanicNilError，则增加非默认 PanicNilError 的计数。
 			panicnil.IncNonDefault()
 		}
 	}
 
+	// 获取当前 goroutine 的状态信息。
 	gp := getg()
+
+	// 如果当前 goroutine 不是当前正在执行的 goroutine，则打印 panic 信息并抛出异常。
+	// 这意味着 panic 发生在系统栈上。
 	if gp.m.curg != gp {
 		print("panic: ")
 		printany(e)
@@ -840,12 +923,15 @@ func gopanic(e any) {
 		throw("panic on system stack")
 	}
 
+	// 如果当前 goroutine 正在执行内存分配，则打印 panic 信息并抛出异常。
 	if gp.m.mallocing != 0 {
 		print("panic: ")
 		printany(e)
 		print("\n")
 		throw("panic during malloc")
 	}
+
+	// 如果当前 goroutine 的抢占被禁用，则打印 panic 信息和禁用原因，并抛出异常。
 	if gp.m.preemptoff != "" {
 		print("panic: ")
 		printany(e)
@@ -855,6 +941,8 @@ func gopanic(e any) {
 		print("\n")
 		throw("panic during preemptoff")
 	}
+
+	// 如果当前 goroutine 持有锁，则打印 panic 信息并抛出异常。
 	if gp.m.locks != 0 {
 		print("panic: ")
 		printany(e)
@@ -862,160 +950,167 @@ func gopanic(e any) {
 		throw("panic holding locks")
 	}
 
-	var p _panic
-	p.arg = e
-	p.link = gp._panic
-	gp._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
+	var p _panic                                        // 创建一个新的 _panic 结构体。
+	p.arg = e                                           // e 通常是导致 panic 的错误或异常的值
+	p.link = gp._panic                                  // 代表当前 goroutine 中发生的最新的 panic
+	gp._panic = (*_panic)(noescape(unsafe.Pointer(&p))) //  p 的地址在后续操作中不会被垃圾回收器释放
 
+	// 增加当前正在运行的 panic 的 defer 数量计数。
 	runningPanicDefers.Add(1)
 
-	// By calculating getcallerpc/getcallersp here, we avoid scanning the
-	// gopanic frame (stack scanning is slow...)
+	// 计算当前 goroutine 的调用者 PC 和 SP，避免扫描 gopanic 函数的栈帧。
 	addOneOpenDeferFrame(gp, getcallerpc(), unsafe.Pointer(getcallersp()))
 
 	for {
+		// 依次查询当前的defer链表
 		d := gp._defer
 		if d == nil {
 			break
 		}
 
-		// If defer was started by earlier panic or Goexit (and, since we're back here, that triggered a new panic),
-		// take defer off list. An earlier panic will not continue running, but we will make sure below that an
-		// earlier Goexit does continue running.
+		// 如果 defer 已经开始执行（由之前的 panic 或 Goexit 触发），则从列表中移除。
 		if d.started {
 			if d._panic != nil {
+				// 如果 defer 与一个 panic 相关联，则将 panic 的 aborted(是否终止) 字段设置为 true。
 				d._panic.aborted = true
 			}
+			// 清除 defer 与 panic 的关联。
 			d._panic = nil
 			if !d.openDefer {
-				// For open-coded defers, we need to process the
-				// defer again, in case there are any other defers
-				// to call in the frame (not including the defer
-				// call that caused the panic).
+				// 对于非开放编码(defer)的 defer，需要从列表中移除。
+				// 清除 defer 的 fn 字段。
 				d.fn = nil
+				// 更新当前 goroutine 的 _defer 指针，将其设置为 d.link，从而从列表中移除 d。
 				gp._defer = d.link
+				// 释放 defer 占用的资源。
 				freedefer(d)
 				continue
 			}
 		}
 
-		// Mark defer as started, but keep on list, so that traceback
-		// can find and update the defer's argument frame if stack growth
-		// or a garbage collection happens before executing d.fn.
+		// 标记 defer 为已开始执行，但仍保留在列表中，以便在执行 d.fn 之前可以找到并更新 defer 的参数帧。
 		d.started = true
 
-		// Record the panic that is running the defer.
-		// If there is a new panic during the deferred call, that panic
-		// will find d in the list and will mark d._panic (this panic) aborted.
+		// 记录正在运行 defer 的 panic。
 		d._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
 
+		// 标志表示 defer 是否已完成执行。
 		done := true
+
 		if d.openDefer {
+			// 如果 defer 是开放编码(defer)的，则调用 runOpenDeferFrame 函数来执行 defer。
 			done = runOpenDeferFrame(d)
 			if done && !d._panic.recovered {
+				// 如果 defer 已完成执行且没有被 recover 捕获，则需要添加一个新的空的开放编码(defer)帧。
 				addOneOpenDeferFrame(gp, 0, nil)
 			}
 		} else {
+			// 如果 defer 不是开放编码(defer)的，则直接调用 defer 的 fn 字段所指向的函数。
 			p.argp = unsafe.Pointer(getargp())
-			d.fn()
+			d.fn() // 真正调用defer定义的函数
 		}
 		p.argp = nil
 
-		// Deferred function did not panic. Remove d.
+		// 如果延迟函数没有引发 panic，则移除 defer。
 		if gp._defer != d {
+			// 如果 gp._defer 不等于 d，则表示 defer 的状态与预期不符。
 			throw("bad defer entry in panic")
 		}
+		// 清除 defer 与 panic 的关联。
 		d._panic = nil
 
-		// trigger shrinkage to test stack copy. See stack_test.go:TestStackPanic
-		//GC()
+		// 触发栈收缩以测试栈复制。参见 stack_test.go:TestStackPanic
+		// GC()
 
-		pc := d.pc
-		sp := unsafe.Pointer(d.sp) // must be pointer so it gets adjusted during stack copy
+		pc := d.pc                 // 保存 defer 的 PC 和 SP 值。
+		sp := unsafe.Pointer(d.sp) // 必须是指针类型，以便在栈复制期间进行调整。
+
+		// 如果 defer 已完成执行，则执行以下操作：
 		if done {
+			// 清除 defer 的 fn 字段。
 			d.fn = nil
+			// 更新当前 goroutine 的 _defer 指针，将其设置为 d.link，从而从列表中移除 d。
 			gp._defer = d.link
+			// 释放 defer 占用的资源。
 			freedefer(d)
 		}
+
+		// 如果 panic 被 recover 捕获，则更新 gp._panic。
 		if p.recovered {
 			gp._panic = p.link
+
+			// 如果下一个 panic 是 goexit 类型且已被中止，则需要特殊处理。
 			if gp._panic != nil && gp._panic.goexit && gp._panic.aborted {
-				// A normal recover would bypass/abort the Goexit.  Instead,
-				// we return to the processing loop of the Goexit.
+				// 一个正常的 recover 会绕过/中止 Goexit。相反，
+				// 我们返回到 Goexit 的处理循环。
 				gp.sigcode0 = uintptr(gp._panic.sp)
 				gp.sigcode1 = uintptr(gp._panic.pc)
 				mcall(recovery)
-				throw("bypassed recovery failed") // mcall should not return
+				throw("bypassed recovery failed") // mcall 应该不会返回
 			}
+
+			// 减少正在运行的 panic 的 defer 数量计数。
 			runningPanicDefers.Add(-1)
 
-			// After a recover, remove any remaining non-started,
-			// open-coded defer entries, since the corresponding defers
-			// will be executed normally (inline). Any such entry will
-			// become stale once we run the corresponding defers inline
-			// and exit the associated stack frame. We only remove up to
-			// the first started (in-progress) open defer entry, not
-			// including the current frame, since any higher entries will
-			// be from a higher panic in progress, and will still be
-			// needed.
+			// 在 recover 之后，移除任何剩余的未开始执行的、开放编码(defer)的 defer 条目。
 			d := gp._defer
 			var prev *_defer
 			if !done {
-				// Skip our current frame, if not done. It is
-				// needed to complete any remaining defers in
-				// deferreturn()
+				// 跳过当前帧（如果没有完成），它是完成 deferreturn() 中剩余 defer 所需的。
 				prev = d
 				d = d.link
 			}
 			for d != nil {
 				if d.started {
-					// This defer is started but we
-					// are in the middle of a
-					// defer-panic-recover inside of
-					// it, so don't remove it or any
-					// further defer entries
+					// 这个 defer 已经开始执行，但我们正处于 defer-panic-recover 的中间过程，
+					// 因此不要移除它或任何进一步的 defer 条目。
 					break
 				}
 				if d.openDefer {
+					// 如果 prev 为 nil，则表示 d 是列表的第一个元素。
 					if prev == nil {
 						gp._defer = d.link
 					} else {
+						// 如果 prev 不为 nil，则表示 d 不是列表的第一个元素。
 						prev.link = d.link
 					}
+					// 释放 defer 占用的资源。
 					newd := d.link
 					freedefer(d)
+					// 更新 d 为下一个 defer。
 					d = newd
 				} else {
+					// 更新 prev 为 d，即当前 defer。
 					prev = d
+					// 更新 d 为下一个 defer。
 					d = d.link
 				}
 			}
 
 			gp._panic = p.link
-			// Aborted panics are marked but remain on the g.panic list.
-			// Remove them from the list.
+			// 已被标记为中止的 panic 仍然保留在 g.panic 列表中。
+			// 从列表中移除它们。
 			for gp._panic != nil && gp._panic.aborted {
 				gp._panic = gp._panic.link
 			}
-			if gp._panic == nil { // must be done with signal
+			if gp._panic == nil { // 必须通过信号完成
 				gp.sig = 0
 			}
-			// Pass information about recovering frame to recovery.
+			// 传递有关恢复帧的信息给 recovery。
 			gp.sigcode0 = uintptr(sp)
 			gp.sigcode1 = pc
-			mcall(recovery)
-			throw("recovery failed") // mcall should not return
+			mcall(recovery)          // 调用 recover 后，撤销栈并安排继续执行
+			throw("recovery failed") // mcall 应该不会返回
 		}
 	}
 
-	// ran out of deferred calls - old-school panic now
-	// Because it is unsafe to call arbitrary user code after freezing
-	// the world, we call preprintpanics to invoke all necessary Error
-	// and String methods to prepare the panic strings before startpanic.
+	// 没有剩余的 defer 调用 - 现在进行旧式的 panic 处理。
+	// 为了避免在冻结世界后调用任意用户代码的不安全性，我们在 startpanic 之前调用 preprintpanics，
+	// 以便调用所有必要的 Error 和 String 方法来准备 panic 字符串。
 	preprintpanics(gp._panic)
 
-	fatalpanic(gp._panic) // should not return
-	*(*int)(nil) = 0      // not reached
+	fatalpanic(gp._panic) // 应该不会返回
+	*(*int)(nil) = 0      // 不应达到此处
 }
 
 // getargp returns the location where the caller
@@ -1027,25 +1122,30 @@ func getargp() uintptr {
 	return getcallersp() + sys.MinFrameSize
 }
 
-// The implementation of the predeclared function recover.
-// Cannot split the stack because it needs to reliably
-// find the stack segment of its caller.
+// 实现预声明的 recover 函数。
+// 由于需要可靠地找到调用者的栈段，因此不能分割栈。
 //
-// TODO(rsc): Once we commit to CopyStackAlways,
-// this doesn't need to be nosplit.
+// TODO(rsc): 一旦我们承诺始终使用 CopyStackAlways，
+// 这个函数就不需要 nosplit 属性了。
 //
 //go:nosplit
 func gorecover(argp uintptr) any {
-	// Must be in a function running as part of a deferred call during the panic.
-	// Must be called from the topmost function of the call
-	// (the function used in the defer statement).
-	// p.argp is the argument pointer of that topmost deferred function call.
-	// Compare against argp reported by caller.
-	// If they match, the caller is the one who can recover.
+	// 必须在 panic 期间作为 defer 调用的一部分运行的函数中调用。
+	// 必须从最顶层的函数调用（即 defer 语句中使用的函数）中调用。
+	// p.argp 是最顶层的 defer 函数调用的参数指针。
+	// 与调用者报告的 argp 进行比较。
+	// 如果匹配，那么调用者就是可以进行 recover 的一方。
+	// 调用 getg() 获取当前 goroutine (gp)
 	gp := getg()
+	// 当前 goroutine 的 _panic 结构体
 	p := gp._panic
+	// 检查是否正在进行 goexit (!p.goexit)。
+	// 检查是否已经被 recover 捕获 (!p.recovered)
+	// 检查 argp 是否与 _panic 结构体中的 argp 匹配
 	if p != nil && !p.goexit && !p.recovered && argp == uintptr(p.argp) {
+		// 如果以上条件都满足，则将 p.recovered 设置为 true，表示 panic 已被捕获
 		p.recovered = true
+		// 返回 panic 时传递的值。
 		return p.arg
 	}
 	return nil
@@ -1107,41 +1207,38 @@ var panicking atomic.Uint32
 // so that two concurrent panics don't overlap their output.
 var paniclk mutex
 
-// Unwind the stack after a deferred function calls recover
-// after a panic. Then arrange to continue running as though
-// the caller of the deferred function returned normally.
+// 在一个 defer 函数调用 recover 后，撤销栈并安排继续执行，就好像 defer 函数的调用者正常返回一样。
 func recovery(gp *g) {
-	// Info about defer passed in G struct.
+	// 有关在 G 结构中传递的 defer 的信息。
 	sp := gp.sigcode0
 	pc := gp.sigcode1
 
-	// d's arguments need to be in the stack.
+	// d 的参数需要在栈中。
 	if sp != 0 && (sp < gp.stack.lo || gp.stack.hi < sp) {
+		// 如果栈指针不在 goroutine 的栈范围内，则打印错误信息并抛出异常。
 		print("recover: ", hex(sp), " not in [", hex(gp.stack.lo), ", ", hex(gp.stack.hi), "]\n")
 		throw("bad recovery")
 	}
 
-	// Make the deferproc for this d return again,
-	// this time returning 1. The calling function will
-	// jump to the standard return epilogue.
+	// 使 deferproc 对于这个 d 再次返回，
+	// 这次返回 1。调用函数将会跳转到标准返回尾声。
 	gp.sched.sp = sp
 	gp.sched.pc = pc
 	gp.sched.lr = 0
-	// Restore the bp on platforms that support frame pointers.
-	// N.B. It's fine to not set anything for platforms that don't
-	// support frame pointers, since nothing consumes them.
+	// 恢复支持帧指针的平台上的 bp。
+	// 注意：对于不支持帧指针的平台，不设置任何值也是可以的，因为没有东西会消费它们。
 	switch {
 	case goarch.IsAmd64 != 0:
-		// On x86, the architectural bp is stored 2 words below the
-		// stack pointer.
+		// 在 x86 架构中，架构 bp 存储在栈指针下方两个字的位置。
 		gp.sched.bp = *(*uintptr)(unsafe.Pointer(sp - 2*goarch.PtrSize))
 	case goarch.IsArm64 != 0:
-		// on arm64, the architectural bp points one word higher
-		// than the sp.
+		// 在 arm64 架构中，架构 bp 指向比 sp 高一个字的位置。
 		gp.sched.bp = sp - goarch.PtrSize
 	}
+
+	// 设置返回值，表示 defer 函数正常返回。
 	gp.sched.ret = 1
-	gogo(&gp.sched)
+	gogo(&gp.sched) // defer恢复执行。
 }
 
 // fatalthrow implements an unrecoverable runtime throw. It freezes the
