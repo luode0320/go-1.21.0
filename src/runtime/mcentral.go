@@ -17,31 +17,12 @@ import (
 	"runtime/internal/sys"
 )
 
-// Central list of free objects of a given size.
+// 中央列表，包含特定大小的空闲对象。
 type mcentral struct {
 	_         sys.NotInHeap
-	spanclass spanClass
-
-	// partial and full contain two mspan sets: one of swept in-use
-	// spans, and one of unswept in-use spans. These two trade
-	// roles on each GC cycle. The unswept set is drained either by
-	// allocation or by the background sweeper in every GC cycle,
-	// so only two roles are necessary.
-	//
-	// sweepgen is increased by 2 on each GC cycle, so the swept
-	// spans are in partial[sweepgen/2%2] and the unswept spans are in
-	// partial[1-sweepgen/2%2]. Sweeping pops spans from the
-	// unswept set and pushes spans that are still in-use on the
-	// swept set. Likewise, allocating an in-use span pushes it
-	// on the swept set.
-	//
-	// Some parts of the sweeper can sweep arbitrary spans, and hence
-	// can't remove them from the unswept set, but will add the span
-	// to the appropriate swept list. As a result, the parts of the
-	// sweeper and mcentral that do consume from the unswept list may
-	// encounter swept spans, and these should be ignored.
-	partial [2]spanSet // list of spans with a free object
-	full    [2]spanSet // list of spans with no free objects
+	spanclass spanClass  // span 的大小类别
+	partial   [2]spanSet // 包含两个 spanSet，分别用于存放清扫过的和未清扫过的在用 span
+	full      [2]spanSet // 包含两个 spanSet，分别用于存放清扫过的和未清扫过的完全使用的 span
 }
 
 // Initialize a single central free list.

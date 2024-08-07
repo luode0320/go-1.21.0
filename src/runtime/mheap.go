@@ -52,182 +52,84 @@ const (
 	physPageAlignedStacks = GOOS == "openbsd"
 )
 
-// Main malloc heap.
-// The heap itself is the "free" and "scav" treaps,
-// but all the other global data is here too.
+// 主内存分配堆。为下层MCentral和MCache提供内存服务。他管理的基本单位是MSpan
+// 堆本身是 "free" 和 "scav" 数据结构，
+// 但是其他全局数据也在这里。
 //
-// mheap must not be heap-allocated because it contains mSpanLists,
-// which must not be heap-allocated.
+// mheap 必须不是堆分配的，因为它包含 mSpanLists，
+// 这些列表必须不是堆分配的。
 type mheap struct {
 	_ sys.NotInHeap
 
-	// lock must only be acquired on the system stack, otherwise a g
-	// could self-deadlock if its stack grows with the lock held.
-	lock mutex
+	lock     mutex     // 必须只在系统栈上获取，否则可能会自我死锁，如果持有锁时栈增长。
+	pages    pageAlloc // 页面分配数据结构
+	sweepgen uint32    // 扫描代，见 mspan 注释；在 STW 期间写入
+	allspans []*mspan  // 所有已存在的 span
 
-	pages pageAlloc // page allocation data structure
+	pagesInUse         atomic.Uintptr // 已使用 span 的页面数
+	pagesSwept         atomic.Uint64  // 本次扫描周期已扫描的页面数
+	pagesSweptBasis    atomic.Uint64  // 作为比例扫描比率原点的 pagesSwept
+	sweepHeapLiveBasis uint64         // 作为比例扫描比率原点的 gcController.heapLive
+	sweepPagesPerByte  float64        // 比例扫描比率；在持有锁时写入，在不持有锁时读取
 
-	sweepgen uint32 // sweep generation, see comment in mspan; written during STW
+	// 页面回收器状态
 
-	// allspans is a slice of all mspans ever created. Each mspan
-	// appears exactly once.
-	//
-	// The memory for allspans is manually managed and can be
-	// reallocated and move as the heap grows.
-	//
-	// In general, allspans is protected by mheap_.lock, which
-	// prevents concurrent access as well as freeing the backing
-	// store. Accesses during STW might not hold the lock, but
-	// must ensure that allocation cannot happen around the
-	// access (since that may free the backing store).
-	allspans []*mspan // all spans out there
+	reclaimIndex  atomic.Uint64  // allArenas 中下一个要回收的页面的索引
+	reclaimCredit atomic.Uintptr // 由于页面回收器以大块工作，可能会回收超过请求的页面数。多余释放页面都会进入这个信用池。
 
-	// Proportional sweep
-	//
-	// These parameters represent a linear function from gcController.heapLive
-	// to page sweep count. The proportional sweep system works to
-	// stay in the black by keeping the current page sweep count
-	// above this line at the current gcController.heapLive.
-	//
-	// The line has slope sweepPagesPerByte and passes through a
-	// basis point at (sweepHeapLiveBasis, pagesSweptBasis). At
-	// any given time, the system is at (gcController.heapLive,
-	// pagesSwept) in this space.
-	//
-	// It is important that the line pass through a point we
-	// control rather than simply starting at a 0,0 origin
-	// because that lets us adjust sweep pacing at any time while
-	// accounting for current progress. If we could only adjust
-	// the slope, it would create a discontinuity in debt if any
-	// progress has already been made.
-	pagesInUse         atomic.Uintptr // pages of spans in stats mSpanInUse
-	pagesSwept         atomic.Uint64  // pages swept this cycle
-	pagesSweptBasis    atomic.Uint64  // pagesSwept to use as the origin of the sweep ratio
-	sweepHeapLiveBasis uint64         // value of gcController.heapLive to use as the origin of sweep ratio; written with lock, read without
-	sweepPagesPerByte  float64        // proportional sweep ratio; written with lock, read without
+	arenas          [1 << arenaL1Bits]*[1 << arenaL2Bits]*heapArena // 是堆区域映射。它指向整个可用虚拟地址空间中
+	arenasHugePages bool                                            // 表示 arenas 的 L2 条目是否有资格被巨大页面支持。
 
-	// Page reclaimer state
+	heapArenaAlloc linearAlloc // 是预保留的空间，用于分配 heapArena 对象。
+	arenaHints     *arenaHint  //  是一个列表，包含尝试添加更多堆区域的地址。
+	arena          linearAlloc // 是预保留的空间，用于分配 heap 区域（实际的区域）。这仅在 32 位上使用。
+	allArenas      []arenaIdx  // 是每个已映射区域的 arenaIndex。这可以用来遍历地址空间。
+	sweepArenas    []arenaIdx  // 是在扫描周期开始时对 allArenas 的快照。
+	markArenas     []arenaIdx  // 是在标记周期开始时对 allArenas 的快照。
 
-	// reclaimIndex is the page index in allArenas of next page to
-	// reclaim. Specifically, it refers to page (i %
-	// pagesPerArena) of arena allArenas[i / pagesPerArena].
-	//
-	// If this is >= 1<<63, the page reclaimer is done scanning
-	// the page marks.
-	reclaimIndex atomic.Uint64
-
-	// reclaimCredit is spare credit for extra pages swept. Since
-	// the page reclaimer works in large chunks, it may reclaim
-	// more than requested. Any spare pages released go to this
-	// credit pool.
-	reclaimCredit atomic.Uintptr
-
-	// arenas is the heap arena map. It points to the metadata for
-	// the heap for every arena frame of the entire usable virtual
-	// address space.
-	//
-	// Use arenaIndex to compute indexes into this array.
-	//
-	// For regions of the address space that are not backed by the
-	// Go heap, the arena map contains nil.
-	//
-	// Modifications are protected by mheap_.lock. Reads can be
-	// performed without locking; however, a given entry can
-	// transition from nil to non-nil at any time when the lock
-	// isn't held. (Entries never transitions back to nil.)
-	//
-	// In general, this is a two-level mapping consisting of an L1
-	// map and possibly many L2 maps. This saves space when there
-	// are a huge number of arena frames. However, on many
-	// platforms (even 64-bit), arenaL1Bits is 0, making this
-	// effectively a single-level map. In this case, arenas[0]
-	// will never be nil.
-	arenas [1 << arenaL1Bits]*[1 << arenaL2Bits]*heapArena
-
-	// arenasHugePages indicates whether arenas' L2 entries are eligible
-	// to be backed by huge pages.
-	arenasHugePages bool
-
-	// heapArenaAlloc is pre-reserved space for allocating heapArena
-	// objects. This is only used on 32-bit, where we pre-reserve
-	// this space to avoid interleaving it with the heap itself.
-	heapArenaAlloc linearAlloc
-
-	// arenaHints is a list of addresses at which to attempt to
-	// add more heap arenas. This is initially populated with a
-	// set of general hint addresses, and grown with the bounds of
-	// actual heap arena ranges.
-	arenaHints *arenaHint
-
-	// arena is a pre-reserved space for allocating heap arenas
-	// (the actual arenas). This is only used on 32-bit.
-	arena linearAlloc
-
-	// allArenas is the arenaIndex of every mapped arena. This can
-	// be used to iterate through the address space.
-	//
-	// Access is protected by mheap_.lock. However, since this is
-	// append-only and old backing arrays are never freed, it is
-	// safe to acquire mheap_.lock, copy the slice header, and
-	// then release mheap_.lock.
-	allArenas []arenaIdx
-
-	// sweepArenas is a snapshot of allArenas taken at the
-	// beginning of the sweep cycle. This can be read safely by
-	// simply blocking GC (by disabling preemption).
-	sweepArenas []arenaIdx
-
-	// markArenas is a snapshot of allArenas taken at the beginning
-	// of the mark cycle. Because allArenas is append-only, neither
-	// this slice nor its contents will change during the mark, so
-	// it can be read safely.
-	markArenas []arenaIdx
-
-	// curArena is the arena that the heap is currently growing
-	// into. This should always be physPageSize-aligned.
+	// 是堆当前正在增长的区域。
+	// 这应该是 physPageSize 对齐的。
 	curArena struct {
 		base, end uintptr
 	}
 
-	// central free lists for small size classes.
-	// the padding makes sure that the mcentrals are
-	// spaced CacheLinePadSize bytes apart, so that each mcentral.lock
-	// gets its own cache line.
-	// central is indexed by spanClass.
+	// 中央自由列表用于小型 size 类。
+	// 填充确保 mcentrals 间隔 CacheLinePadSize 字节，
+	// 这样每个 mcentral.lock 都有自己的缓存行。
+	// central 由 spanClass 索引。
 	central [numSpanClasses]struct {
 		mcentral mcentral
 		pad      [(cpu.CacheLinePadSize - unsafe.Sizeof(mcentral{})%cpu.CacheLinePadSize) % cpu.CacheLinePadSize]byte
 	}
 
-	spanalloc              fixalloc // allocator for span*
-	cachealloc             fixalloc // allocator for mcache*
-	specialfinalizeralloc  fixalloc // allocator for specialfinalizer*
-	specialprofilealloc    fixalloc // allocator for specialprofile*
-	specialReachableAlloc  fixalloc // allocator for specialReachable
-	specialPinCounterAlloc fixalloc // allocator for specialPinCounter
-	speciallock            mutex    // lock for special record allocators.
-	arenaHintAlloc         fixalloc // allocator for arenaHints
+	spanalloc              fixalloc // span* 的固定分配器
+	cachealloc             fixalloc // mcache* 的固定分配器
+	specialfinalizeralloc  fixalloc // specialfinalizer* 的固定分配器
+	specialprofilealloc    fixalloc // specialprofile* 的固定分配器
+	specialReachableAlloc  fixalloc // specialReachable 的固定分配器
+	specialPinCounterAlloc fixalloc // specialPinCounter 的固定分配器
+	speciallock            mutex    // special 记录分配器的锁
+	arenaHintAlloc         fixalloc // arenaHint 的固定分配器
 
-	// User arena state.
+	// 用户区域状态。
 	//
-	// Protected by mheap_.lock.
+	// 受 mheap_.lock 保护。
 	userArena struct {
-		// arenaHints is a list of addresses at which to attempt to
-		// add more heap arenas for user arena chunks. This is initially
-		// populated with a set of general hint addresses, and grown with
-		// the bounds of actual heap arena ranges.
+		// 是一个列表，包含尝试添加更多堆区域
+		// 用于用户区域块的地址。这最初用一组通用提示地址填充，
+		// 并随着实际堆区域范围的增长而扩展。
 		arenaHints *arenaHint
 
-		// quarantineList is a list of user arena spans that have been set to fault, but
-		// are waiting for all pointers into them to go away. Sweeping handles
-		// identifying when this is true, and moves the span to the ready list.
+		// 是一个列表，包含已被设置为故障但
+		// 正在等待所有指向它们的指针消失的用户区域 span。
+		// 扫描处理识别何时为真，并将 span 移动到就绪列表。
 		quarantineList mSpanList
 
-		// readyList is a list of empty user arena spans that are ready for reuse.
+		// 是一个列表，包含为空的用户区域 span，已准备好重用。
 		readyList mSpanList
 	}
 
-	unused *specialfinalizer // never set, just here to force the specialfinalizer type into DWARF
+	unused *specialfinalizer // 未使用，只是为了将 specialfinalizer 类型引入 DWARF。
 }
 
 var mheap_ mheap
@@ -407,99 +309,94 @@ type mSpanList struct {
 	last  *mspan // last span in list, or nil if none
 }
 
+// 结构体表示内存中的一个连续的内存段。
+// 每个 span 都包含一定数量的连续页面。
 type mspan struct {
-	_    sys.NotInHeap
-	next *mspan     // next span in list, or nil if none
-	prev *mspan     // previous span in list, or nil if none
-	list *mSpanList // For debugging. TODO: Remove.
+	_ sys.NotInHeap
 
-	startAddr uintptr // address of first byte of span aka s.base()
-	npages    uintptr // number of pages in span
+	// 链表相关字段
+	next *mspan     // 下一个 span 在列表中的指针，或 nil 如果没有下一个
+	prev *mspan     // 上一个 span 在列表中的指针，或 nil 如果没有上一个
+	list *mSpanList // 用于调试。TODO: 删除
 
-	manualFreeList gclinkptr // list of free objects in mSpanManual spans
+	// span 的起始地址和页面数量
+	startAddr uintptr // span 中第一个字节的地址
+	npages    uintptr // span 中的页面数量
 
-	// freeindex is the slot index between 0 and nelems at which to begin scanning
-	// for the next free object in this span.
-	// Each allocation scans allocBits starting at freeindex until it encounters a 0
-	// indicating a free object. freeindex is then adjusted so that subsequent scans begin
-	// just past the newly discovered free object.
+	// 用于 mSpanManual spans 的空闲对象列表
+	manualFreeList gclinkptr // mSpanManual spans 中空闲对象的列表
+
+	// freeindex 和 allocBits 相关字段
+	// freeindex 是在 0 和 nelems 之间的槽索引，用于开始扫描
+	// span 中的下一个空闲对象。
+	// 每次分配都会从 freeindex 开始扫描 allocBits 直到遇到 0，
+	// 表示找到一个空闲对象。freeindex 随后会被调整，以便后续扫描从
+	// 新发现的空闲对象之后开始。
 	//
-	// If freeindex == nelem, this span has no free objects.
+	// 如果 freeindex == nelem，表示 span 中没有空闲对象。
 	//
-	// allocBits is a bitmap of objects in this span.
-	// If n >= freeindex and allocBits[n/8] & (1<<(n%8)) is 0
-	// then object n is free;
-	// otherwise, object n is allocated. Bits starting at nelem are
-	// undefined and should never be referenced.
-	//
-	// Object n starts at address n*elemsize + (start << pageShift).
+	// allocBits 是 span 中对象的位图。
+	// 如果 n >= freeindex 且 allocBits[n/8] & (1<<(n%8)) 为 0，
+	// 则表示对象 n 是空闲的；
+	// 否则，对象 n 已分配。从 nelem 开始的位是未定义的，不应引用。
 	freeindex uintptr
-	// TODO: Look up nelems from sizeclass and remove this field if it
-	// helps performance.
-	nelems uintptr // number of object in the span.
+	// TODO: 从 sizeclass 查找 nelems 并移除此字段如果这样做有助于性能。
+	nelems uintptr // span 中的对象数量
 
-	// Cache of the allocBits at freeindex. allocCache is shifted
-	// such that the lowest bit corresponds to the bit freeindex.
-	// allocCache holds the complement of allocBits, thus allowing
-	// ctz (count trailing zero) to use it directly.
-	// allocCache may contain bits beyond s.nelems; the caller must ignore
-	// these.
+	// allocCache 是 allocBits 在 freeindex 的缓存。
+	// allocCache 通过移位使得最低位对应于 freeindex。
+	// allocCache 存储 allocBits 的补码，允许 ctz (计数尾部零) 直接使用它。
+	// allocCache 可能包含 s.nelems 之外的位；调用者必须忽略这些位。
 	allocCache uint64
 
-	// allocBits and gcmarkBits hold pointers to a span's mark and
-	// allocation bits. The pointers are 8 byte aligned.
-	// There are three arenas where this data is held.
-	// free: Dirty arenas that are no longer accessed
-	//       and can be reused.
-	// next: Holds information to be used in the next GC cycle.
-	// current: Information being used during this GC cycle.
-	// previous: Information being used during the last GC cycle.
-	// A new GC cycle starts with the call to finishsweep_m.
-	// finishsweep_m moves the previous arena to the free arena,
-	// the current arena to the previous arena, and
-	// the next arena to the current arena.
-	// The next arena is populated as the spans request
-	// memory to hold gcmarkBits for the next GC cycle as well
-	// as allocBits for newly allocated spans.
+	// allocBits 和 gcmarkBits 指向 span 的标记位和分配位。
+	// 指针为 8 字节对齐。
+	// 有三个区域用于保存这些数据：
+	// free: 脏区域，不再被访问，可以重用。
+	// next: 用于下一次 GC 周期的数据。
+	// current: 当前 GC 周期中正在使用的数据。
+	// previous: 上一次 GC 周期中使用的数据。
+	// 新的 GC 周期从 finishsweep_m 调用开始。
+	// finishsweep_m 将 previous 区域移动到 free 区域，
+	// 将 current 区域移动到 previous 区域，
+	// 并将 next 区域移动到 current 区域。
+	// next 区域在 span 请求用于下一次 GC 周期的 gcmarkBits
+	// 以及新分配 span 的 allocBits 时被填充。
 	//
-	// The pointer arithmetic is done "by hand" instead of using
-	// arrays to avoid bounds checks along critical performance
-	// paths.
-	// The sweep will free the old allocBits and set allocBits to the
-	// gcmarkBits. The gcmarkBits are replaced with a fresh zeroed
-	// out memory.
+	// 指针运算通过手工完成而不是使用数组，
+	// 以避免关键性能路径上的边界检查。
+	// 清扫会释放旧的 allocBits 并将 allocBits 设置为 gcmarkBits。
+	// gcmarkBits 会被替换为新鲜的清零内存。
 	allocBits  *gcBits
 	gcmarkBits *gcBits
-	pinnerBits *gcBits // bitmap for pinned objects; accessed atomically
+	pinnerBits *gcBits // 用于固定对象的位图；原子访问
 
-	// sweep generation:
-	// if sweepgen == h->sweepgen - 2, the span needs sweeping
-	// if sweepgen == h->sweepgen - 1, the span is currently being swept
-	// if sweepgen == h->sweepgen, the span is swept and ready to use
-	// if sweepgen == h->sweepgen + 1, the span was cached before sweep began and is still cached, and needs sweeping
-	// if sweepgen == h->sweepgen + 3, the span was swept and then cached and is still cached
-	// h->sweepgen is incremented by 2 after every GC
+	// 扫描代：
+	// 如果 sweepgen == h->sweepgen - 2，span 需要清扫
+	// 如果 sweepgen == h->sweepgen - 1，span 正在清扫
+	// 如果 sweepgen == h->sweepgen，span 已清扫并准备好使用
+	// 如果 sweepgen == h->sweepgen + 1，span 在清扫开始前被缓存并且仍然被缓存，需要清扫
+	// 如果 sweepgen == h->sweepgen + 3，span 已清扫然后被缓存并且仍然被缓存
+	// h->sweepgen 在每次 GC 后增加 2
 
 	sweepgen              uint32
-	divMul                uint32        // for divide by elemsize
-	allocCount            uint16        // number of allocated objects
-	spanclass             spanClass     // size class and noscan (uint8)
-	state                 mSpanStateBox // mSpanInUse etc; accessed atomically (get/set methods)
-	needzero              uint8         // needs to be zeroed before allocation
-	isUserArenaChunk      bool          // whether or not this span represents a user arena
-	allocCountBeforeCache uint16        // a copy of allocCount that is stored just before this span is cached
-	elemsize              uintptr       // computed from sizeclass or from npages
-	limit                 uintptr       // end of data in span
-	speciallock           mutex         // guards specials list and changes to pinnerBits
-	specials              *special      // linked list of special records sorted by offset.
-	userArenaChunkFree    addrRange     // interval for managing chunk allocation
+	divMul                uint32        // 除以 elemsize 的乘法因子
+	allocCount            uint16        // 已分配的对象数量
+	spanclass             spanClass     // 大小类别和 noscan 标志（uint8）
+	state                 mSpanStateBox // mSpanInUse 等；原子访问（get/set 方法）
+	needzero              uint8         // 在分配前需要清零
+	isUserArenaChunk      bool          // span 是否代表用户区域
+	allocCountBeforeCache uint16        // span 缓存之前 allocCount 的副本
+	elemsize              uintptr       // 从 sizeclass 或 npages 计算得出
+	limit                 uintptr       // span 中数据的结束位置
+	speciallock           mutex         // 保护 specials 列表和 pinnerBits 的更改
+	specials              *special      // 按偏移排序的特殊记录的链表
+	userArenaChunkFree    addrRange     // 用于管理块分配的区间
 
-	// freeIndexForScan is like freeindex, except that freeindex is
-	// used by the allocator whereas freeIndexForScan is used by the
-	// GC scanner. They are two fields so that the GC sees the object
-	// is allocated only when the object and the heap bits are
-	// initialized (see also the assignment of freeIndexForScan in
-	// mallocgc, and issue 54596).
+	// freeIndexForScan 类似于 freeindex，但 freeindex 由分配器使用，
+	// 而 freeIndexForScan 由 GC 扫描器使用。
+	// 它们是两个字段，以便 GC 在对象和堆位初始化时看到对象已分配
+	// （参见 mallocgc 中 freeIndexForScan 的赋值，以及 issue 54596）。
 	freeIndexForScan uintptr
 }
 

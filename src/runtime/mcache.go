@@ -10,46 +10,35 @@ import (
 	"unsafe"
 )
 
-// Per-thread (in Go, per-P) cache for small objects.
-// This includes a small object cache and local allocation stats.
-// No locking needed because it is per-thread (per-P).
+// 每线程（在 Go 中，每 P）的小对象缓存。
+// 这包括一个小对象缓存和本地分配统计信息。
+// 无需锁定，因为它是一个线程局部的缓存。
 //
-// mcaches are allocated from non-GC'd memory, so any heap pointers
-// must be specially handled.
+// mcaches 从非 GC 内存分配，因此任何堆指针都需要特别处理。
 type mcache struct {
 	_ sys.NotInHeap
 
-	// The following members are accessed on every malloc,
-	// so they are grouped here for better caching.
-	nextSample uintptr // trigger heap sample after allocating this many bytes
-	scanAlloc  uintptr // bytes of scannable heap allocated
+	// 以下成员在每次分配时都会被访问，
+	// 因此它们被放在一起以提高缓存性能。
 
-	// Allocator cache for tiny objects w/o pointers.
-	// See "Tiny allocator" comment in malloc.go.
+	nextSample uintptr // 分配这么多字节后触发堆采样,下一次触发堆采样的阈值
+	scanAlloc  uintptr // 分配的可扫描堆字节数
 
-	// tiny points to the beginning of the current tiny block, or
-	// nil if there is no current tiny block.
-	//
-	// tiny is a heap pointer. Since mcache is in non-GC'd memory,
-	// we handle it by clearing it in releaseAll during mark
-	// termination.
-	//
-	// tinyAllocs is the number of tiny allocations performed
-	// by the P that owns this mcache.
-	tiny       uintptr
-	tinyoffset uintptr
-	tinyAllocs uintptr
+	// 用于无指针的小对象的分配器缓存。
+	// 请参阅 malloc.go 中的“Tiny 分配器”注释。
 
-	// The rest is not accessed on every malloc.
+	tiny       uintptr // 指向当前 tiny 块的开头，如果没有当前 tiny 块则为 nil。
+	tinyoffset uintptr //  当前 tiny 块中已分配的偏移量。
+	tinyAllocs uintptr // 是拥有这个 mcache 的 P 执行的 tiny 分配次数。
 
-	alloc [numSpanClasses]*mspan // spans to allocate from, indexed by spanClass
+	// 以下成员不在每次分配时访问。
 
-	stackcache [_NumStackOrders]stackfreelist
+	alloc      [numSpanClasses]*mspan         // 用于存储不同大小类别的 span，方便快速分配
+	stackcache [_NumStackOrders]stackfreelist // 栈缓存，用于管理栈分配的空闲列表
 
-	// flushGen indicates the sweepgen during which this mcache
-	// was last flushed. If flushGen != mheap_.sweepgen, the spans
-	// in this mcache are stale and need to the flushed so they
-	// can be swept. This is done in acquirep.
+	// 表示此 mcache 最后一次刷新时的 sweepgen。
+	// 如果 flushGen != mheap_.sweepgen，则表示此 mcache 中的 span 已过时，
+	// 需要刷新以便清扫。这在 acquirep 中完成。
 	flushGen atomic.Uint32
 }
 
