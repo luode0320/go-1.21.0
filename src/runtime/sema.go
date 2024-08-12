@@ -111,61 +111,80 @@ func semacquire(addr *uint32) {
 	semacquire1(addr, false, 0, 0, waitReasonSemacquire)
 }
 
+// 试图获取信号量。
+// 如果信号量不可用，则当前协程会被挂起，直到信号量可用。
+// addr 是指向信号量的地址。
+// lifo 控制挂起队列的行为（LIFO 或 FIFO）。
+// profile 用于配置是否记录阻塞和互斥锁的性能数据。
+// skipframes 用于跳过调用栈中的几层，以便正确地报告等待原因。
+// reason 是等待的原因。
 func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags, skipframes int, reason waitReason) {
 	gp := getg()
 	if gp != gp.m.curg {
 		throw("semacquire not on the G stack")
 	}
 
-	// Easy case.
+	// 容易的情况：如果信号量可用，则直接返回。
 	if cansemacquire(addr) {
 		return
 	}
 
-	// Harder case:
-	//	increment waiter count
-	//	try cansemacquire one more time, return if succeeded
-	//	enqueue itself as a waiter
-	//	sleep
-	//	(waiter descriptor is dequeued by signaler)
-	s := acquireSudog()
-	root := semtable.rootFor(addr)
-	t0 := int64(0)
+	// 更复杂的情况：
+	// 1. 增加等待者计数。
+	// 2. 再次尝试 cansemacquire，如果成功则返回。
+	// 3. 将自身加入等待队列。
+	// 4. 挂起协程。
+	// 5. 等待信号量可用（等待者描述符由信号量释放者从队列中移除）。
+
+	s := acquireSudog() // 获取一个等待描述符 sudog
+
+	root := semtable.rootFor(addr) // 获取信号量对应的 semtable 节点
+	t0 := int64(0)                 // 初始化 CPU 时间戳
 	s.releasetime = 0
 	s.acquiretime = 0
 	s.ticket = 0
+
+	// 如果启用了信号量阻塞性能数据记录，并且 blockprofilerate 大于 0，
+	// 则记录当前 CPU 时间戳，用于后续计算阻塞时间。
 	if profile&semaBlockProfile != 0 && blockprofilerate > 0 {
 		t0 = cputicks()
 		s.releasetime = -1
 	}
+	// 如果启用了信号量互斥锁性能数据记录，并且 mutexprofilerate 大于 0，
+	// 则记录当前 CPU 时间戳，用于后续计算等待时间。
 	if profile&semaMutexProfile != 0 && mutexprofilerate > 0 {
 		if t0 == 0 {
 			t0 = cputicks()
 		}
 		s.acquiretime = t0
 	}
+
 	for {
-		lockWithRank(&root.lock, lockRankRoot)
-		// Add ourselves to nwait to disable "easy case" in semrelease.
-		root.nwait.Add(1)
-		// Check cansemacquire to avoid missed wakeup.
+		lockWithRank(&root.lock, lockRankRoot) // 加锁 semtable 节点
+		root.nwait.Add(1)                      // 增加等待者计数，以禁用信号量释放时的“容易情况”。
+
+		// 再次尝试 cansemacquire，以防错过唤醒。
 		if cansemacquire(addr) {
-			root.nwait.Add(-1)
-			unlock(&root.lock)
+			root.nwait.Add(-1) // 减少等待者计数
+			unlock(&root.lock) // 解锁 semtable 节点
 			break
 		}
-		// Any semrelease after the cansemacquire knows we're waiting
-		// (we set nwait above), so go to sleep.
-		root.queue(addr, s, lifo)
-		goparkunlock(&root.lock, reason, traceBlockSync, 4+skipframes)
+		// 任何在 cansemacquire 之后的信号量释放都会知道我们在等待
+		// （因为我们设置了 nwait），所以可以挂起协程。
+		root.queue(addr, s, lifo)                                      // 将协程加入等待队列
+		goparkunlock(&root.lock, reason, traceBlockSync, 4+skipframes) // 挂起协程
+
+		// 如果 ticket 已经分配或者信号量已经可用，则退出循环。
 		if s.ticket != 0 || cansemacquire(addr) {
 			break
 		}
 	}
+	// 如果记录了阻塞时间，则记录阻塞事件。
 	if s.releasetime > 0 {
 		blockevent(s.releasetime-t0, 3+skipframes)
 	}
-	releaseSudog(s)
+
+	releaseSudog(s) // 释放等待描述符 sudog
 }
 
 func semrelease(addr *uint32) {
@@ -230,12 +249,23 @@ func semrelease1(addr *uint32, handoff bool, skipframes int) {
 	}
 }
 
+// 尝试获取信号量。
+// 如果信号量可用，则减小信号量的值并返回 true；
+// 如果信号量不可用，则返回 false。
+// addr 是指向信号量的地址。
 func cansemacquire(addr *uint32) bool {
 	for {
+		// 读取addr地址的信号量的当前值。
 		v := atomic.Load(addr)
+
+		// 如果信号量的值为 0，则信号量不可用。
 		if v == 0 {
 			return false
 		}
+
+		// 尝试使用原子操作将信号量的值减 1。
+		// 如果成功，则返回 true，表示信号量已被获取。
+		// 如果失败，则再次循环尝试。
 		if atomic.Cas(addr, v, v-1) {
 			return true
 		}

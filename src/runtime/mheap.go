@@ -327,11 +327,9 @@ type mspan struct {
 	manualFreeList gclinkptr // mSpanManual spans 中空闲对象的列表
 
 	// freeindex 和 allocBits 相关字段
-	// freeindex 是在 0 和 nelems 之间的槽索引，用于开始扫描
-	// span 中的下一个空闲对象。
-	// 每次分配都会从 freeindex 开始扫描 allocBits 直到遇到 0，
-	// 表示找到一个空闲对象。freeindex 随后会被调整，以便后续扫描从
-	// 新发现的空闲对象之后开始。
+	// freeindex 是在 0 和 nelems 之间的槽索引，用于开始扫描 span 中的下一个空闲对象。
+	// 每次分配都会从 freeindex 开始扫描 allocBits 直到遇到 0，表示找到一个空闲对象。
+	// freeindex 随后会被调整，以便后续扫描从新发现的空闲对象之后开始。
 	//
 	// 如果 freeindex == nelem，表示 span 中没有空闲对象。
 	//

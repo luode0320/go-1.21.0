@@ -1306,48 +1306,63 @@ func morestackc() {
 	throw("attempt to execute system stack code on user stack")
 }
 
-// startingStackSize is the amount of stack that new goroutines start with.
-// It is a power of 2, and between _FixedStack and maxstacksize, inclusive.
-// startingStackSize is updated every GC by tracking the average size of
-// stacks scanned during the GC.
+// 表示新 goroutines 启动时分配的初始栈大小。
+// 它是一个 2 的幂，并且介于 _FixedStack 和 maxstacksize 之间，包括这两个值。
+// startingStackSize 在每次垃圾回收过程中都会更新，通过跟踪扫描的栈大小的平均值来实现。
 var startingStackSize uint32 = fixedStack
 
+// 用于计算新的 goroutines 启动时应分配的初始栈大小。
+// 如果启用了适应性栈大小调整，则该函数会跟踪扫描的栈大小的平均值，并将
+// 新 goroutines 的初始栈大小设置为该平均值。
+// 这种方法旨在避免在 goroutine 生命周期早期进行过多的栈增长工作。
 func gcComputeStartingStackSize() {
+	// 如果禁用了适应性栈大小调整，则直接返回。
 	if debug.adaptivestackstart == 0 {
 		return
 	}
-	// For details, see the design doc at
+
+	// 详情请参阅设计文档：
 	// https://docs.google.com/document/d/1YDlGIdVTPnmUiTAavlZxBI1d9pwGQgZT7IKFKlIXohQ/edit?usp=sharing
-	// The basic algorithm is to track the average size of stacks
-	// and start goroutines with stack equal to that average size.
-	// Starting at the average size uses at most 2x the space that
-	// an ideal algorithm would have used.
-	// This is just a heuristic to avoid excessive stack growth work
-	// early in a goroutine's lifetime. See issue 18138. Stacks that
-	// are allocated too small can still grow, and stacks allocated
-	// too large can still shrink.
-	var scannedStackSize uint64
-	var scannedStacks uint64
+	// 基本算法是跟踪扫描的栈的平均大小，并将新 goroutines 的初始栈大小
+	// 设置为该平均值。这样做的目的是使用最多两倍于理想算法所需的空间。
+	// 这仅仅是一种启发式方法，用于避免在 goroutine 的生命周期早期进行过度的栈增长工作。
+	// 参见 issue 18138。分配过小的栈仍然可以增长，分配过大的栈也可以缩小。
+
+	var scannedStackSize uint64 // 扫描的所有栈的总大小
+	var scannedStacks uint64    // 扫描的栈的数量
+
+	// 遍历所有 P
 	for _, p := range allp {
+		// 累加 P 的扫描栈大小和扫描栈数量
 		scannedStackSize += p.scannedStackSize
 		scannedStacks += p.scannedStacks
-		// Reset for next time
+
+		// 重置 P 的扫描栈大小和扫描栈数量，为下一次计算做准备
 		p.scannedStackSize = 0
 		p.scannedStacks = 0
 	}
+
+	// 如果没有扫描任何栈，则直接返回默认的初始栈大小
 	if scannedStacks == 0 {
 		startingStackSize = fixedStack
 		return
 	}
+
+	// 计算平均栈大小
+	// 注意：我们加上 stackGuard 以确保使用平均空间的 goroutine 不会触发栈增长。
 	avg := scannedStackSize/scannedStacks + stackGuard
-	// Note: we add stackGuard to ensure that a goroutine that
-	// uses the average space will not trigger a growth.
+
+	// 限制平均栈大小的最大值
 	if avg > uint64(maxstacksize) {
 		avg = uint64(maxstacksize)
 	}
+
+	// 限制平均栈大小的最小值
 	if avg < fixedStack {
 		avg = fixedStack
 	}
-	// Note: maxstacksize fits in 30 bits, so avg also does.
+
+	// 注意：maxstacksize 占用 30 位，因此 avg 也占用 30 位。
+	// 将平均栈大小四舍五入为最近的 2 的幂，并转换为 uint32 类型
 	startingStackSize = uint32(round2(int32(avg)))
 }

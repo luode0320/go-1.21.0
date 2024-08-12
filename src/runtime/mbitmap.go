@@ -321,52 +321,54 @@ func badPointer(s *mspan, p, refBase, refOff uintptr) {
 	throw("found bad pointer in Go heap (incorrect use of unsafe or cgo?)")
 }
 
-// findObject returns the base address for the heap object containing
-// the address p, the object's span, and the index of the object in s.
-// If p does not point into a heap object, it returns base == 0.
+// findObject 返回包含地址 p 的堆对象的基本地址、该对象的 span 以及对象在 span 中的索引。
+// 如果 p 不指向堆中的对象，则返回 base == 0。
 //
-// If p points is an invalid heap pointer and debug.invalidptr != 0,
-// findObject panics.
+// 如果 p 是无效的堆指针，并且 debug.invalidptr != 0，则 findObject 会引发 panic。
 //
-// refBase and refOff optionally give the base address of the object
-// in which the pointer p was found and the byte offset at which it
-// was found. These are used for error reporting.
+// refBase 和 refOff 可选地给出发现指针 p 的对象的基本地址和该指针在其内部的字节偏移。
+// 这些信息用于错误报告。
 //
-// It is nosplit so it is safe for p to be a pointer to the current goroutine's stack.
-// Since p is a uintptr, it would not be adjusted if the stack were to move.
+// 它被标记为 nosplit，因此即使 p 是指向当前 goroutine 栈的指针，也是安全的。
+// 由于 p 是 uintptr 类型，因此即使栈移动也不会被调整。
 //
 //go:nosplit
 func findObject(p, refBase, refOff uintptr) (base uintptr, s *mspan, objIndex uintptr) {
+	// 查找 span:
+	// 使用 spanOf 函数查找包含地址 p 的 span。
+	// spanOf 函数返回一个指向 mspan 结构体的指针，该结构体描述了包含 p 的堆对象所在的内存块。
 	s = spanOf(p)
-	// If s is nil, the virtual address has never been part of the heap.
-	// This pointer may be to some mmap'd region, so we allow it.
+
+	// 检查 span 是否为 nil:
+	// 如果 s 为 nil，则表示 p 不指向堆中的对象。
+	// 如果 s 为 nil 且 p 等于 clobberdeadPtr 并且 debug.invalidptr != 0，则引发 panic。
 	if s == nil {
 		if (GOARCH == "amd64" || GOARCH == "arm64") && p == clobberdeadPtr && debug.invalidptr != 0 {
-			// Crash if clobberdeadPtr is seen. Only on AMD64 and ARM64 for now,
-			// as they are the only platform where compiler's clobberdead mode is
-			// implemented. On these platforms clobberdeadPtr cannot be a valid address.
+			// 如果检测到 clobberdeadPtr，则引发 panic。目前仅在 AMD64 和 ARM64 上实现，
+			// 因为它们是唯一实现了编译器 clobberdead 模式的平台。在这两个平台上，clobberdeadPtr 无法成为有效的地址。
 			badPointer(s, p, refBase, refOff)
 		}
 		return
 	}
-	// If p is a bad pointer, it may not be in s's bounds.
-	//
-	// Check s.state to synchronize with span initialization
-	// before checking other fields. See also spanOfHeap.
+
+	// 验证 span 的状态:
+	// 使用 s.state.get() 获取 span 的状态。
+	// 如果状态不是 mSpanInUse 或者 p 不在 span 的范围内，则检查其他情况。
 	if state := s.state.get(); state != mSpanInUse || p < s.base() || p >= s.limit {
-		// Pointers into stacks are also ok, the runtime manages these explicitly.
+		// 如果状态为 mSpanManual，则认为这是一个栈指针，无需进一步处理。
 		if state == mSpanManual {
 			return
 		}
-		// The following ensures that we are rigorous about what data
-		// structures hold valid pointers.
+		//如果 debug.invalidptr != 0，则引发 panic。
 		if debug.invalidptr != 0 {
 			badPointer(s, p, refBase, refOff)
 		}
 		return
 	}
 
+	// 计算对象索引: 计算 p 在 span 中的索引
 	objIndex = s.objIndex(p)
+	// 使用 s.base() 和 s.elemsize 计算对象的基本地址
 	base = s.base() + objIndex*s.elemsize
 	return
 }

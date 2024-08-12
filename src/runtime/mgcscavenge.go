@@ -287,8 +287,8 @@ type scavengerState struct {
 	// timer is the timer used for the scavenger to sleep.
 	timer *timer
 
-	// sysmonWake signals to sysmon that it should wake the scavenger.
-	sysmonWake atomic.Uint32
+	// sysmonWake 向 Sysmon 发出信号，表明它应该唤醒拾荒者。
+	sysmonWake atomic.Uint32 // 向 Sysmon 发出信号，表明清道夫应该被唤醒。
 
 	// targetCPUFraction is the target CPU overhead for the scavenger.
 	targetCPUFraction float64
@@ -425,9 +425,9 @@ func (s *scavengerState) park() {
 	goparkunlock(&s.lock, waitReasonGCScavengeWait, traceBlockSystemGoroutine, 2)
 }
 
-// ready signals to sysmon that the scavenger should be awoken.
+// 向 Sysmon 发出信号，表明清道夫应该被唤醒。
 func (s *scavengerState) ready() {
-	s.sysmonWake.Store(1)
+	s.sysmonWake.Store(1) // 向 Sysmon 发出信号，表明清道夫应该被唤醒。
 }
 
 // wake immediately unparks the scavenger if necessary.
@@ -437,7 +437,7 @@ func (s *scavengerState) wake() {
 	lock(&s.lock)
 	if s.parked {
 		// Unset sysmonWake, since the scavenger is now being awoken.
-		s.sysmonWake.Store(0)
+		s.sysmonWake.Store(0) // 关闭清道夫
 
 		// s.parked is unset to prevent a double wake-up.
 		s.parked = false
@@ -567,99 +567,86 @@ func (s *scavengerState) controllerFailed() {
 	unlock(&s.lock)
 }
 
-// run is the body of the main scavenging loop.
+// run 是后台清扫 goroutine 主循环的主体。
 //
-// Returns the number of bytes released and the estimated time spent
-// releasing those bytes.
+// 返回释放的字节数和估计的释放这些字节所花费的时间。
 //
-// Must be run on the scavenger goroutine.
+// 必须在清扫 goroutine 上运行。
 func (s *scavengerState) run() (released uintptr, worked float64) {
+	// 获取清扫状态锁。
 	lock(&s.lock)
+
 	if getg() != s.g {
 		throw("tried to run scavenger from another goroutine")
 	}
+
+	// 释放清扫状态锁。
 	unlock(&s.lock)
 
+	// 循环直到达到最小清扫工作时间。
 	for worked < minScavWorkTime {
-		// If something from outside tells us to stop early, stop.
+		// 如果来自外部的信号要求提前停止，则停止。
 		if s.shouldStop() {
 			break
 		}
 
-		// scavengeQuantum is the amount of memory we try to scavenge
-		// in one go. A smaller value means the scavenger is more responsive
-		// to the scheduler in case of e.g. preemption. A larger value means
-		// that the overheads of scavenging are better amortized, so better
-		// scavenging throughput.
-		//
-		// The current value is chosen assuming a cost of ~10µs/physical page
-		// (this is somewhat pessimistic), which implies a worst-case latency of
-		// about 160µs for 4 KiB physical pages. The current value is biased
-		// toward latency over throughput.
+		// scavengeQuantum 定义了一次清扫尝试释放的内存量。
+		// 较小的值意味着清扫器对调度器更加响应（例如在抢占情况下）。较大的值意味着清扫开销更好摊销，从而提高清扫吞吐量。
+		// 当前值假设每次清扫物理页面的成本约为 10 微秒，这意味着对于 4 KiB 物理页面最坏情况下的延迟大约为 160 微秒。
+		// 当前值偏向于延迟而非吞吐量。
 		const scavengeQuantum = 64 << 10
 
-		// Accumulate the amount of time spent scavenging.
-		r, duration := s.scavenge(scavengeQuantum)
+		// 累计清扫所花费的时间。
+		r, duration := s.scavenge(scavengeQuantum) // 执行清扫操作。
 
-		// On some platforms we may see end >= start if the time it takes to scavenge
-		// memory is less than the minimum granularity of its clock (e.g. Windows) or
-		// due to clock bugs.
-		//
-		// In this case, just assume scavenging takes 10 µs per regular physical page
-		// (determined empirically), and conservatively ignore the impact of huge pages
-		// on timing.
+		// 在某些平台上，我们可能会看到 end >= start，如果清扫内存所需的时间小于其时钟的最小粒度（例如 Windows）或由于时钟错误。
+		// 在这种情况下，假设清扫每个常规物理页面需要 10 微秒（通过实验确定），并保守地忽略巨大页面对定时的影响。
 		const approxWorkedNSPerPhysicalPage = 10e3
 		if duration == 0 {
+			// 如果清扫时间为 0，则使用近似值估算清扫时间。
 			worked += approxWorkedNSPerPhysicalPage * float64(r/physPageSize)
 		} else {
-			// TODO(mknyszek): If duration is small compared to worked, it could be
-			// rounded down to zero. Probably not a problem in practice because the
-			// values are all within a few orders of magnitude of each other but maybe
-			// worth worrying about.
+			// 如果清扫时间不为 0，则直接累加。
 			worked += float64(duration)
 		}
-		released += r
+		released += r // 累加释放的字节数。
 
-		// scavenge does not return until it either finds the requisite amount of
-		// memory to scavenge, or exhausts the heap. If we haven't found enough
-		// to scavenge, then the heap must be exhausted.
+		// 如果释放的字节数少于 scavengeQuantum，则意味着堆已经被清扫完毕。
 		if r < scavengeQuantum {
 			break
 		}
-		// When using fake time just do one loop.
+		// 当使用假时间时，只执行一次循环。
 		if faketime != 0 {
 			break
 		}
 	}
+
+	// 如果释放的字节数大于 0 且小于物理页面大小，则可能尝试释放了部分物理页面。
+	// 这可能导致内存损坏，因为可能释放了仍在使用的部分。
 	if released > 0 && released < physPageSize {
-		// If this happens, it means that we may have attempted to release part
-		// of a physical page, but the likely effect of that is that it released
-		// the whole physical page, some of which may have still been in-use.
-		// This could lead to memory corruption. Throw.
 		throw("released less than one physical page of memory")
 	}
-	return
+
+	return // 返回释放的字节数和清扫所花费的时间。
 }
 
-// Background scavenger.
+// 后台清扫 goroutine。
 //
-// The background scavenger maintains the RSS of the application below
-// the line described by the proportional scavenging statistics in
-// the mheap struct.
+// 后台清扫 goroutine 负责维持应用程序的驻留集大小（RSS）低于由 mheap 结构中的比例清扫统计信息所描述的线。
 func bgscavenge(c chan int) {
-	scavenger.init()
+	scavenger.init() // 初始化清扫器。
 
-	c <- 1
-	scavenger.park()
+	c <- 1           // 通过通道发送信号，表示清扫 goroutine 已经启动。
+	scavenger.park() // 将清扫 goroutine 设置为等待状态。
 
 	for {
-		released, workTime := scavenger.run()
+		released, workTime := scavenger.run() // 执行清扫操作，返回释放的页数和清扫所花费的时间。
 		if released == 0 {
-			scavenger.park()
-			continue
+			scavenger.park() // 如果没有释放任何页，则将清扫 goroutine 设置为等待状态。
+			continue         // 继续下一轮循环。
 		}
-		mheap_.pages.scav.releasedBg.Add(released)
-		scavenger.sleep(workTime)
+		mheap_.pages.scav.releasedBg.Add(released) // 更新已释放的页数统计信息。
+		scavenger.sleep(workTime)                  // 休眠清扫所花费的时间。
 	}
 }
 

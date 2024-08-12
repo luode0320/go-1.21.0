@@ -140,7 +140,7 @@ var runtimeInitTime int64
 // Value to use for signal mask for newly created M's.
 var initSigmask sigset
 
-// The main goroutine.
+// go 程序启动的主方法
 func main() { // 这是主goroutine
 	mp := getg().m
 
@@ -206,7 +206,7 @@ func main() { // 这是主goroutine
 		}
 	}()
 
-	gcenable()
+	gcenable() // 负责启动垃圾回收的相关组件，并启用垃圾回收
 
 	main_init_done = make(chan bool)
 	if iscgo {
@@ -306,27 +306,45 @@ func os_beforeExit(exitCode int) {
 	}
 }
 
-// start forcegc helper goroutine
+// 初始化 forcegc 辅助 goroutine
 func init() {
 	go forcegchelper()
 }
 
+// forcegchelper 函数是一个辅助 goroutine，用于处理强制 GC 的逻辑。
 func forcegchelper() {
+	// 为 forcegc 结构体分配一个 goroutine。forcegc是全局变量。
 	forcegc.g = getg()
+	// 初始化 forcegc 的锁。
 	lockInit(&forcegc.lock, lockRankForcegc)
+
+	// 无限循环，持续处理强制 GC。
 	for {
+		// 加锁以确保对 forcegc 结构体的操作是原子的。
 		lock(&forcegc.lock)
+
+		// 检查是否处于空闲状态。
 		if forcegc.idle.Load() {
+			// 如果处于空闲状态，抛出错误，因为不应该在此时进入空闲状态。
 			throw("forcegc: phase error")
 		}
+
+		// 将 forcegc.idle 设置为 true，表示 GC 处于空闲状态。
 		forcegc.idle.Store(true)
+
+		// 释放锁并让出 CPU 时间片，等待 sysmon() 被唤醒。
 		goparkunlock(&forcegc.lock, waitReasonForceGCIdle, traceBlockSystemGoroutine, 1)
-		// this goroutine is explicitly resumed by sysmon
+
+		// 这个 goroutine 明确地被 sysmon 唤醒。
 		if debug.gctrace > 0 {
+			// 如果启用了 GC 跟踪，输出一条消息表示 GC 被强制触发。
 			println("GC forced")
 		}
-		// Time-triggered, fully concurrent.
-		gcStart(gcTrigger{kind: gcTriggerTime, now: nanotime()})
+
+		// 根据时间触发条件启动一个新的 GC 周期。
+		// 这是一个完全并发的 GC 周期。
+		// gcTriggerTime: 强制gc
+		gcStart(gcTrigger{kind: gcTriggerTime, now: nanotime()}) // 超时2分钟强制启动垃圾回收
 	}
 }
 
@@ -911,26 +929,33 @@ func fastrandinit() {
 	getRandomData(s)
 }
 
-// Mark gp ready to run.
+// 函数用于将一个 goroutine 标记为可运行状态，并将其放置到运行队列中。
+// 它会检查 goroutine 的状态，并确保状态是等待状态。
+// 通过这些步骤，这段代码确保了 goroutine 能够被正确地放置到运行队列中，并准备好被执行。
 func ready(gp *g, traceskip int, next bool) {
+	// 如果跟踪启用，则记录 goroutine 解除阻塞。
 	if traceEnabled() {
 		traceGoUnpark(gp, traceskip)
 	}
 
-	status := readgstatus(gp)
+	status := readgstatus(gp) // 读取 goroutine 的状态。
 
-	// Mark runnable.
-	mp := acquirem() // disable preemption because it can be holding p in a local var
+	// 标记为可运行状态。
+
+	mp := acquirem() // 获取 m，禁用抢占，因为它可能持有 p 在局部变量中。
+
+	// 如果状态不是等待状态，则打印状态。
 	if status&^_Gscan != _Gwaiting {
-		dumpgstatus(gp)
-		throw("bad g->status in ready")
+		dumpgstatus(gp)                 // 如果状态不是等待状态，则打印状态。
+		throw("bad g->status in ready") // 抛出异常，因为状态不正确。
 	}
 
-	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
+	// 状态是 Gwaiting 或 Gscanwaiting，将其标记为 Grunnable 并放入运行队列。
 	casgstatus(gp, _Gwaiting, _Grunnable)
-	runqput(mp.p.ptr(), gp, next)
-	wakep()
-	releasem(mp)
+
+	runqput(mp.p.ptr(), gp, next) // 将 goroutine 放入运行队列。
+	wakep()                       // 唤醒 p。
+	releasem(mp)                  // 释放 m。
 }
 
 // freezeStopWait is a large value that freezetheworld sets
@@ -1219,18 +1244,18 @@ type stwReason uint8
 //
 // Avoid reusing reasons and add new ones instead.
 const (
-	stwUnknown                     stwReason = iota // "unknown"
-	stwGCMarkTerm                                   // "GC mark termination"
-	stwGCSweepTerm                                  // "GC sweep termination"
-	stwWriteHeapDump                                // "write heap dump"
-	stwGoroutineProfile                             // "goroutine profile"
-	stwGoroutineProfileCleanup                      // "goroutine profile cleanup"
-	stwAllGoroutinesStack                           // "all goroutines stack trace"
-	stwReadMemStats                                 // "read mem stats"
-	stwAllThreadsSyscall                            // "AllThreadsSyscall"
-	stwGOMAXPROCS                                   // "GOMAXPROCS"
-	stwStartTrace                                   // "start trace"
-	stwStopTrace                                    // "stop trace"
+	stwUnknown                     stwReason = iota // "未知"
+	stwGCMarkTerm                                   // 垃圾回收标记终止。
+	stwGCSweepTerm                                  // 垃圾回收清扫终止。
+	stwWriteHeapDump                                // 写入堆转储。
+	stwGoroutineProfile                             // Goroutine 分析配置文件。
+	stwGoroutineProfileCleanup                      //  Goroutine 分析配置文件清理。
+	stwAllGoroutinesStack                           // 获取所有 Goroutine 的栈轨迹。
+	stwReadMemStats                                 // 读取内存统计信息。
+	stwAllThreadsSyscall                            // 执行 AllThreadsSyscall 操作。
+	stwGOMAXPROCS                                   // 更改 GOMAXPROCS 的值。
+	stwStartTrace                                   // 开始追踪。
+	stwStopTrace                                    // 停止追踪。
 	stwForTestCountPagesInUse                       // "CountPagesInUse (test)"
 	stwForTestReadMetricsSlow                       // "ReadMetricsSlow (test)"
 	stwForTestReadMemStatsSlow                      // "ReadMemStatsSlow (test)"
@@ -1340,15 +1365,13 @@ func startTheWorldGC() {
 	semrelease(&gcsema)
 }
 
-// 持有worldsema赋予了M试图阻止世界的权利。
+// 持有 worldsema 赋予了 M 试图阻止世界的权利。
 var worldsema uint32 = 1
 
-// Holding gcsema grants the M the right to block a GC, and blocks
-// until the current GC is done. In particular, it prevents gomaxprocs
-// from changing concurrently.
-//
-// TODO(mknyszek): Once gomaxprocs and the execution tracer can handle
-// being changed/enabled during a GC, remove this.
+// 它用于控制垃圾回收期间的并发操作, 持有 gcsema 的 M 可以阻止垃圾回收的进一步进行
+// 持有 gcsema 的 M 会等待垃圾回收完全完成才能继续执行
+// 持有 gcsema 变量还可以阻止 gomaxprocs 的值在垃圾回收期间被改变,这是为了避免在垃圾回收过程中并发线程数的变化导致的不一致问题
+// 一旦 gomaxprocs 和执行追踪器能够在垃圾回收期间被改变/启用，就可以移除 gcsema 这个同步机制
 var gcsema uint32 = 1
 
 // stopTheWorldWithSema 是 Stop-The-World 停止世界机制的核心实现。
@@ -1429,7 +1452,7 @@ func stopTheWorldWithSema(reason stwReason) {
 				noteclear(&sched.stopnote)
 				break
 			}
-			preemptall() // 强制所有 P 预抢占，确保它们都停止
+			preemptall() // 通知所有正在运行的 goroutines 被抢占，并要求它们停止。
 		}
 	}
 
@@ -1459,59 +1482,76 @@ func stopTheWorldWithSema(reason stwReason) {
 	worldStopped()
 }
 
+// 函数用于恢复所有用户 goroutine 的执行。
+// 它在垃圾回收或其他需要停止世界的操作完成后被调用。
 func startTheWorldWithSema() int64 {
+	// 断言世界已被停止
 	assertWorldStopped()
 
-	mp := acquirem() // disable preemption because it can be holding p in a local var
+	// 获取内存锁
+	mp := acquirem()
+
+	// 处理网络轮询
 	if netpollinited() {
-		list := netpoll(0) // non-blocking
-		injectglist(&list)
+		list := netpoll(0) // 非阻塞轮询
+		injectglist(&list) // 注入 goroutine 列表
 	}
+
+	// 获取调度锁
 	lock(&sched.lock)
 
+	// 调整 GOMAXPROCS
 	procs := gomaxprocs
 	if newprocs != 0 {
 		procs = newprocs
 		newprocs = 0
 	}
-	p1 := procresize(procs)
-	sched.gcwaiting.Store(false)
+
+	p1 := procresize(procs)      // 返回包含本地工作列表的 P 的列表，需要由调用者调度。
+	sched.gcwaiting.Store(false) // 清除垃圾回收等待标志
+
+	// 如果系统监控正在等待，则唤醒它
 	if sched.sysmonwait.Load() {
 		sched.sysmonwait.Store(false)
 		notewakeup(&sched.sysmonnote)
 	}
+
+	// 释放调度锁
 	unlock(&sched.lock)
 
-	worldStarted()
+	worldStarted() // 标记世界已开始
 
+	// 遍历恢复所有被停止的 P
 	for p1 != nil {
 		p := p1
 		p1 = p1.link.ptr()
+		// 如果 P 有绑定的 M
 		if p.m != 0 {
 			mp := p.m.ptr()
 			p.m = 0
 			if mp.nextp != 0 {
 				throw("startTheWorld: inconsistent mp->nextp")
 			}
-			mp.nextp.set(p)
-			notewakeup(&mp.park)
+			mp.nextp.set(p)      // 设置 M 的下一个 P
+			notewakeup(&mp.park) // 唤醒 M
 		} else {
-			// Start M to run P.  Do not start another M below.
+			// 启动 M 来运行 P
 			newm(nil, p, -1)
 		}
 	}
 
-	// Capture start-the-world time before doing clean-up tasks.
+	// 捕获开始世界的时间
 	startTime := nanotime()
+
+	// 如果启用了跟踪，则记录停止世界的完成
 	if traceEnabled() {
 		traceSTWDone()
 	}
 
-	// Wakeup an additional proc in case we have excessive runnable goroutines
-	// in local queues or in the global queue. If we don't, the proc will park itself.
-	// If we have lots of excessive work, resetspinning will unpark additional procs as necessary.
+	// 唤醒额外的处理器以处理可能存在的额外可运行 goroutine
 	wakep()
 
+	// 释放内存锁
 	releasem(mp)
 
 	return startTime
@@ -5731,12 +5771,11 @@ func checkdead() {
 	fatal("all goroutines are asleep - deadlock!")
 }
 
-// forcegcperiod is the maximum time in nanoseconds between garbage
-// collections. If we go this long without a garbage collection, one
-// is forced to run.
+// 定义了两次垃圾回收之间的最大时间间隔（以纳秒为单位）。
+// 如果超过这个时间间隔还没有进行垃圾回收，就会强制触发一次垃圾回收。
 //
-// This is a variable for testing purposes. It normally doesn't change.
-var forcegcperiod int64 = 2 * 60 * 1e9
+// 这个变量主要用于测试目的。在正常情况下，它的值不会改变。
+var forcegcperiod int64 = 2 * 60 * 1e9 // 2 分钟
 
 // needSysmonWorkaround is true if the workaround for
 // golang.org/issue/42515 is needed on NetBSD.
@@ -5869,10 +5908,8 @@ func sysmon() {
 			}
 		}
 
-		// 如果 scavenger 请求唤醒，则唤醒 scavenger。
-		if scavenger.sysmonWake.Load() != 0 {
-			// 如果有人请求，则唤醒清扫程序。
-			scavenger.wake()
+		if scavenger.sysmonWake.Load() != 0 { // 如果 scavenger 请求唤醒，则唤醒 scavenger。
+			scavenger.wake() // 如果有人请求，则唤醒清扫程序。
 		}
 
 		// 函数尝试重新获取因系统调用而阻塞的处理器（P），
@@ -5883,13 +5920,19 @@ func sysmon() {
 			idle++ // 否则增加 idle 计数。
 		}
 
-		// 检查是否需要强制执行 GC
-		if t := (gcTrigger{kind: gcTriggerTime, now: now}); t.test() && forcegc.idle.Load() {
-			lock(&forcegc.lock)
-			forcegc.idle.Store(false)
-			var list gList
-			list.push(forcegc.g)
-			injectglist(&list)
+		// 根据不同的触发条件来决定是否需要启动一个新的 GC 周期。
+		// 创建临时 gcTrigger 实例: 创建一个临时的 gcTrigger 实例，其 kind 为 gcTriggerTime 强制gc标识，now 字段为当前时间。
+		// 调用 test 方法: 调用 gcTrigger 实例的 test 方法来检查是否需要触发超时2分钟的强制 GC。
+		// 检查是否处于空闲状态: 检查 forcegc.idle 是否为 true，即 GC 是否处于空闲状态, 才允许强制gc
+		if t := (gcTrigger{kind: gcTriggerTime, now: now}); t.test() && forcegc.idle.Load() { // test(): 根据不同的触发条件来决定是否需要启动一个新的 GC 周期。
+			lock(&forcegc.lock) // 加锁以确保对 forcegc 结构体的操作是原子的。
+
+			forcegc.idle.Store(false) // 将 forcegc.idle 设置为 false，表示 GC 不再处于空闲状态。
+			var list gList            // 创建一个 gList 结构体，用于存放需要注入的 goroutine。
+			list.push(forcegc.g)      // 将 forcegc.g 添加到 gList 中。
+			injectglist(&list)        // 将 forcegc.g 注入到运行队列中，使其可以被调度执行。
+
+			// 解锁以释放对 forcegc 结构体的独占访问。
 			unlock(&forcegc.lock)
 		}
 
@@ -6011,17 +6054,18 @@ func retake(now int64) uint32 {
 	return uint32(n)
 }
 
-// Tell all goroutines that they have been preempted and they should stop.
-// This function is purely best-effort. It can fail to inform a goroutine if a
-// processor just started running it.
-// No locks need to be held.
-// Returns true if preemption request was issued to at least one goroutine.
+// 通知所有正在运行的 goroutines 被抢占，并要求它们停止。
+// 该函数尽力而为。如果处理器刚刚开始运行一个 goroutine，则可能无法通知该 goroutine。
+// 调用此函数时无需持有任何锁。
+// 如果至少向一个 goroutine 发出了抢占请求，则返回 true。
 func preemptall() bool {
 	res := false
 	for _, pp := range allp {
+		// 如果 P 的状态不是 _Prunning，则跳过。
 		if pp.status != _Prunning {
 			continue
 		}
+		// 函数尝试请求在处理器 P 上运行的 Goroutine 停止
 		if preemptone(pp) {
 			res = true
 		}
@@ -6163,27 +6207,41 @@ func schedtrace(detailed bool) {
 	unlock(&sched.lock)
 }
 
-// schedEnableUser enables or disables the scheduling of user
-// goroutines.
+// schedEnableUser 函数用于启用或禁用用户 goroutine 的调度。因为调度器 p 被 stw 暂停了,所以还不能调度
 //
-// This does not stop already running user goroutines, so the caller
-// should first stop the world when disabling user goroutines.
+// 这不会阻止已经运行的用户 goroutine，因此在禁用用户 goroutine 时，
+// 调用者应首先停止世界。
 func schedEnableUser(enable bool) {
+	// 锁定调度器锁
 	lock(&sched.lock)
+
+	// 如果调度器的状态已经是期望的状态，则直接解锁并返回。
 	if sched.disable.user == !enable {
 		unlock(&sched.lock)
 		return
 	}
+
+	// 设置调度器的用户 goroutine 禁用状态。
 	sched.disable.user = !enable
+
+	// 如果启用用户 goroutine 调度...
 	if enable {
+		// 保存当前禁用的 goroutine 数量。
 		n := sched.disable.n
+		// 将禁用的 goroutine 数量重置为 0。
 		sched.disable.n = 0
+		// 将所有禁用的 goroutine 放入全局可运行队列。
 		globrunqputbatch(&sched.disable.runnable, n)
+
+		// 解锁调度器锁
 		unlock(&sched.lock)
+
+		// 重新调度所有禁用的 goroutine。
 		for ; n != 0 && sched.npidle.Load() != 0; n-- {
-			startm(nil, false, false)
+			startm(nil, false, false) // 启动新的 M
 		}
 	} else {
+		// 如果禁用用户 goroutine 调度，则直接解锁。
 		unlock(&sched.lock)
 	}
 }

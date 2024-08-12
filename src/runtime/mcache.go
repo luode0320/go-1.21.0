@@ -128,46 +128,45 @@ func getMCache(mp *m) *mcache {
 	return c
 }
 
-// refill acquires a new span of span class spc for c. This span will
-// have at least one free object. The current span in c must be full.
+// 为缓存 c 中央列表mcentral中获取一个新的 span，该 span 至少包含一个空闲的对象。
+// 当前缓存中的 span 必须已满。
 //
-// Must run in a non-preemptible context since otherwise the owner of
-// c could change.
+// 必须在不可抢占的上下文中运行，因为否则缓存的所有权可能会发生变化。
 func (c *mcache) refill(spc spanClass) {
-	// Return the current cached span to the central lists.
+	// 将当前缓存的 span 返回到中央列表。
 	s := c.alloc[spc]
 
 	if uintptr(s.allocCount) != s.nelems {
 		throw("refill of span with free space remaining")
 	}
 	if s != &emptymspan {
-		// Mark this span as no longer cached.
+		// 标记这个 span 不再被缓存。
 		if s.sweepgen != mheap_.sweepgen+3 {
 			throw("bad sweepgen in refill")
 		}
 		mheap_.central[spc].mcentral.uncacheSpan(s)
 
-		// Count up how many slots were used and record it.
+		// 统计使用了多少个槽位并记录。
 		stats := memstats.heapStats.acquire()
 		slotsUsed := int64(s.allocCount) - int64(s.allocCountBeforeCache)
 		atomic.Xadd64(&stats.smallAllocCount[spc.sizeclass()], slotsUsed)
 
-		// Flush tinyAllocs.
+		// 刷新 tinyAllocs。
 		if spc == tinySpanClass {
 			atomic.Xadd64(&stats.tinyAllocCount, int64(c.tinyAllocs))
 			c.tinyAllocs = 0
 		}
 		memstats.heapStats.release()
 
-		// Count the allocs in inconsistent, internal stats.
+		// 在不一致的内部统计中计算分配的字节数。
 		bytesAllocated := slotsUsed * int64(s.elemsize)
 		gcController.totalAlloc.Add(bytesAllocated)
 
-		// Clear the second allocCount just to be safe.
+		// 为了安全起见，清空第二次的 allocCount。
 		s.allocCountBeforeCache = 0
 	}
 
-	// Get a new cached span from the central lists.
+	// 从中央列表获取一个新的缓存 span。
 	s = mheap_.central[spc].mcentral.cacheSpan()
 	if s == nil {
 		throw("out of memory")
@@ -177,31 +176,26 @@ func (c *mcache) refill(spc spanClass) {
 		throw("span has no free space")
 	}
 
-	// Indicate that this span is cached and prevent asynchronous
-	// sweeping in the next sweep phase.
+	// 标记这个 span 被缓存，并防止在下一个清扫阶段的异步清扫。
 	s.sweepgen = mheap_.sweepgen + 3
 
-	// Store the current alloc count for accounting later.
+	// 存储当前的 allocCount 以备后续会计使用。
 	s.allocCountBeforeCache = s.allocCount
 
-	// Update heapLive and flush scanAlloc.
+	// 更新 heapLive 和冲刷新的 scanAlloc。
 	//
-	// We have not yet allocated anything new into the span, but we
-	// assume that all of its slots will get used, so this makes
-	// heapLive an overestimate.
+	// 我们还没有向 span 分配任何新的对象，但我们假设 span 中的所有槽位都会被使用，
+	// 所以这使得 heapLive 成为一个高估值。
 	//
-	// When the span gets uncached, we'll fix up this overestimate
-	// if necessary (see releaseAll).
+	// 当 span 被取消缓存时，我们会根据需要修正这个高估值（参见 releaseAll）。
 	//
-	// We pick an overestimate here because an underestimate leads
-	// the pacer to believe that it's in better shape than it is,
-	// which appears to lead to more memory used. See #53738 for
-	// more details.
+	// 我们在这里选择高估值，因为低估会导致 pacer 相信它比实际情况更好，
+	// 这似乎会导致更多的内存使用。详情请参考 issue #53738。
 	usedBytes := uintptr(s.allocCount) * s.elemsize
 	gcController.update(int64(s.npages*pageSize)-int64(usedBytes), int64(c.scanAlloc))
 	c.scanAlloc = 0
 
-	c.alloc[spc] = s
+	c.alloc[spc] = s // 更新缓存中的 span
 }
 
 // allocLarge allocates a span for a large object.

@@ -51,64 +51,63 @@ const (
 	pagesPerSpanRoot = 512
 )
 
-// gcMarkRootPrepare queues root scanning jobs (stacks, globals, and
-// some miscellany) and initializes scanning-related state.
+// 函数用于准备根扫描工作。这包括将全局变量、栈以及其他杂项放入队列中，并初始化扫描相关的状态。
+// go的垃圾回收并没有将跟对象标记为黑色, 而是收集到一个跟对象队列里面, 这个队列引用不会被垃圾回收。
+// 在根扫描阶段，根对象引用的对象会被标记为灰色，并加入到工作队列中
+// 根对象永远不会被垃圾回收，因为它们始终被认为是可达的
 //
-// The world must be stopped.
+// 注意：世界必须被停止。
 func gcMarkRootPrepare() {
+	// 断言世界已被停止
 	assertWorldStopped()
 
-	// Compute how many data and BSS root blocks there are.
+	// 计算数据和 BSS 根块的数量。
 	nBlocks := func(bytes uintptr) int {
-		return int(divRoundUp(bytes, rootBlockBytes))
+		return int(divRoundUp(bytes, rootBlockBytes)) // 计算需要的根块数量
 	}
 
 	work.nDataRoots = 0
 	work.nBSSRoots = 0
 
-	// Scan globals.
+	// 扫描全局变量。
 	for _, datap := range activeModules() {
-		nDataRoots := nBlocks(datap.edata - datap.data)
+		nDataRoots := nBlocks(datap.edata - datap.data) // 计算数据段需要的根块数量
 		if nDataRoots > work.nDataRoots {
 			work.nDataRoots = nDataRoots
 		}
 	}
 
+	// 扫描全局变量。
 	for _, datap := range activeModules() {
-		nBSSRoots := nBlocks(datap.ebss - datap.bss)
+		nBSSRoots := nBlocks(datap.ebss - datap.bss) // 计算 BSS 段需要的根块数量
 		if nBSSRoots > work.nBSSRoots {
 			work.nBSSRoots = nBSSRoots
 		}
 	}
 
-	// Scan span roots for finalizer specials.
+	// 扫描 span 根，用于最终化特殊处理。
 	//
-	// We depend on addfinalizer to mark objects that get
-	// finalizers after root marking.
+	// 我们依赖于 addfinalizer 来标记在根扫描后获得最终化器的对象。
 	//
-	// We're going to scan the whole heap (that was available at the time the
-	// mark phase started, i.e. markArenas) for in-use spans which have specials.
+	// 我们将扫描整个堆（在标记阶段开始时可用的堆，即 markArenas）中使用的 span，这些 span 包含特殊处理。
 	//
-	// Break up the work into arenas, and further into chunks.
+	// 将工作分成 arena，并进一步分成块。
 	//
-	// Snapshot allArenas as markArenas. This snapshot is safe because allArenas
-	// is append-only.
-	mheap_.markArenas = mheap_.allArenas[:len(mheap_.allArenas):len(mheap_.allArenas)]
-	work.nSpanRoots = len(mheap_.markArenas) * (pagesPerArena / pagesPerSpanRoot)
+	// 拍摄 allArenas 的快照作为 markArenas。这个快照是安全的，因为 allArenas 是追加只读的。
+	mheap_.markArenas = mheap_.allArenas[:len(mheap_.allArenas):len(mheap_.allArenas)] // 拍摄 allArenas 的快照
+	work.nSpanRoots = len(mheap_.markArenas) * (pagesPerArena / pagesPerSpanRoot)      // 计算 span 根的数量
 
-	// Scan stacks.
+	// 扫描栈。
 	//
-	// Gs may be created after this point, but it's okay that we
-	// ignore them because they begin life without any roots, so
-	// there's nothing to scan, and any roots they create during
-	// the concurrent phase will be caught by the write barrier.
-	work.stackRoots = allGsSnapshot()
-	work.nStackRoots = len(work.stackRoots)
+	// 可能在这一点之后创建 Gs，但我们忽略它们是可以的，因为它们开始时没有根，
+	// 所以没有什么需要扫描的，并且它们在并发阶段创建的任何根都将由写屏障捕获。
+	work.stackRoots = allGsSnapshot()       // 拍摄所有 Gs 的快照
+	work.nStackRoots = len(work.stackRoots) // 计算栈根的数量
 
-	work.markrootNext = 0
-	work.markrootJobs = uint32(fixedRootCount + work.nDataRoots + work.nBSSRoots + work.nSpanRoots + work.nStackRoots)
+	work.markrootNext = 0                                                                                              // 初始化根扫描的下一个位置
+	work.markrootJobs = uint32(fixedRootCount + work.nDataRoots + work.nBSSRoots + work.nSpanRoots + work.nStackRoots) // 计算总根扫描任务的数量
 
-	// Calculate base indexes of each root type
+	// 计算每种根类型的基本索引
 	work.baseData = uint32(fixedRootCount)
 	work.baseBSS = work.baseData + uint32(work.nDataRoots)
 	work.baseSpans = work.baseBSS + uint32(work.nBSSRoots)
@@ -149,7 +148,7 @@ func gcMarkRootCheck() {
 // ptrmask for an allocation containing a single pointer.
 var oneptrmask = [...]uint8{1}
 
-// markroot 扫描第 i 个根对象。
+// 扫描第 i 个根对象, 将根对象引用的对象标记为灰色
 //
 // 必须禁用抢占（因为这使用了 gcWork）。
 //
@@ -208,6 +207,7 @@ func markroot(gcw *gcWork, i uint32, flushBgCredit bool) int64 {
 
 	// 其余情况为扫描 goroutine 堆栈
 	default:
+		// stackScanWork 是本周期内执行的栈扫描工作的总量。
 		workCounter = &gcController.stackScanWork
 		if i < work.baseStacks || work.baseEnd <= i {
 			printlock()
@@ -215,7 +215,7 @@ func markroot(gcw *gcWork, i uint32, flushBgCredit bool) int64 {
 			throw("markroot: bad index")
 		}
 
-		// 获取要扫描的 goroutine
+		// 从根扫描队列中获取要扫描的 goroutine
 		gp := work.stackRoots[i-work.baseStacks]
 
 		// 如果 goroutine 处于等待或系统调用状态，记录等待时间。
@@ -224,26 +224,23 @@ func markroot(gcw *gcWork, i uint32, flushBgCredit bool) int64 {
 			gp.waitsince = work.tstart
 		}
 
+		// 垃圾回收器能够有效地扫描 goroutine 的堆栈
 		systemstack(func() {
+			// 获取当前 goroutine (userG)
 			userG := getg().m.curg
-			selfScan := gp == userG && readgstatus(userG) == _Grunning
 
-			// 若为自身扫描，则将用户 G 置于 _Gwaiting 以防止自身死锁。
-			// 若这是一个标记工作者或者我们处于标记终止，则可能已经处于 _Gwaiting 状态。
+			// 判断是否为自我扫描：selfScan 为 true 当前 goroutine 正在扫描自己，并且其状态为 _Grunning
+			selfScan := gp == userG && readgstatus(userG) == _Grunning
+			// 如果是自我扫描，将当前 goroutine (userG) 的状态设置为 _Gwaiting，以防止自我死锁
 			if selfScan {
 				casGToWaiting(userG, _Grunning, waitReasonGarbageCollectionScan)
 			}
 
-			// TODO: suspendG 阻塞（并自旋）直到 gp 停止，
-			// 这可能需要一段时间，尤其是对于运行中的 goroutine。
-			// 第一阶段是非阻塞的：我们扫描可以扫描的堆栈，并要求运行中的 goroutine 自行扫描；
-			// 第二阶段则是阻塞的。
-
-			// 使用 `suspendG` 函数暂停 goroutine，以便扫描其堆栈
+			// 使用 suspendG 函数暂停 gp，以便扫描其堆栈, 阻塞（并自旋）直到 gp 停止。
 			stopped := suspendG(gp)
-			// 如果 goroutine 已经死亡，则标记为扫描完成并返回
+			// 如果 gp 已经死亡，标记为扫描完成并返回。
 			if stopped.dead {
-				gp.gcscandone = true
+				gp.gcscandone = true // 表示 g 已扫描栈；受 _Gscan 状态位保护。
 				return
 			}
 			// 如果 goroutine 已经被扫描过，则抛出异常
@@ -251,9 +248,8 @@ func markroot(gcw *gcWork, i uint32, flushBgCredit bool) int64 {
 				throw("g already scanned")
 			}
 
-			// 使用 scanstack 函数来扫描 goroutine 的堆栈
-			workDone += scanstack(gp, gcw)
-			gp.gcscandone = true
+			workDone += scanstack(gp, gcw) // 对根对象所在的内存块进行扫描，并将根对象引用的对象标记为灰色
+			gp.gcscandone = true           // 表示 g 已扫描栈；受 _Gscan 状态位保护。
 
 			// 完成扫描后，使用 resumeG 函数恢复 goroutine 的执行
 			resumeG(stopped)
@@ -277,34 +273,37 @@ func markroot(gcw *gcWork, i uint32, flushBgCredit bool) int64 {
 	return workDone
 }
 
-// markrootBlock scans the shard'th shard of the block of memory [b0,
-// b0+n0), with the given pointer mask.
+// markrootBlock 扫描给定内存块 [b0, b0+n0) 中的第 shard 个分片，使用给定的指针掩码。
 //
-// Returns the amount of work done.
+// 返回完成的工作量。
 //
 //go:nowritebarrier
 func markrootBlock(b0, n0 uintptr, ptrmask0 *uint8, gcw *gcWork, shard int) int64 {
+	// rootBlockBytes 必须是 8 * goarch.PtrSize 的倍数，这是因为指针掩码的每个字节代表了 8 个指针
 	if rootBlockBytes%(8*goarch.PtrSize) != 0 {
-		// This is necessary to pick byte offsets in ptrmask0.
 		throw("rootBlockBytes must be a multiple of 8*ptrSize")
 	}
 
-	// Note that if b0 is toward the end of the address space,
-	// then b0 + rootBlockBytes might wrap around.
-	// These tests are written to avoid any possible overflow.
+	// 计算当前分片的偏移量 off，即 shard * rootBlockBytes。
 	off := uintptr(shard) * rootBlockBytes
+	// 如果 off 大于或等于 n0，则表示该分片超出范围，函数直接返回 0
 	if off >= n0 {
 		return 0
 	}
+
+	// 确定扫描的内存区域:
+	// b 是要扫描的内存块的起始地址。
 	b := b0 + off
+	// ptrmask 是一个指向指针掩码数组的指针，该数组用于指示哪些字节包含有效的指针
 	ptrmask := (*uint8)(add(unsafe.Pointer(ptrmask0), uintptr(shard)*(rootBlockBytes/(8*goarch.PtrSize))))
+	// n 是要扫描的内存块的大小。
 	n := uintptr(rootBlockBytes)
+	// 如果 off + n 大于 n0，则调整 n 以适应实际的内存块大小。
 	if off+n > n0 {
 		n = n0 - off
 	}
 
-	// Scan this shard.
-	scanblock(b, n, ptrmask, gcw, nil)
+	scanblock(b, n, ptrmask, gcw, nil) // 扫描这个分片。
 	return int64(n)
 }
 
@@ -630,13 +629,23 @@ func gcAssistAlloc1(gp *g, scanWork int64) {
 	}
 }
 
-// gcWakeAllAssists wakes all currently blocked assists. This is used
-// at the end of a GC cycle. gcBlackenEnabled must be false to prevent
-// new assists from going to sleep after this point.
+// 用于唤醒所有当前被阻塞的协助（assists）。因为调度器 p 被 stw 暂停了,所以还不能调度
+// 这个函数在垃圾回收周期结束时调用。
+// gcBlackenEnabled 必须为 false，以防止在此之后新的协助进入睡眠状态。
+//
+// gcWakeAllAssists 用于在垃圾回收周期结束时唤醒所有当前被阻塞的协助（assists）。
+// gcBlackenEnabled 必须为 false，以防止在此之后新的协助进入睡眠状态。
 func gcWakeAllAssists() {
+	// 获取协助队列的锁
 	lock(&work.assistQueue.lock)
+
+	// 从协助队列中弹出所有等待的 goroutines 列表
 	list := work.assistQueue.q.popList()
+
+	// 将列表中的 goroutines 注入到运行队列中，使其恢复运行
 	injectglist(&list)
+
+	// 释放协助队列的锁
 	unlock(&work.assistQueue.lock)
 }
 
@@ -736,7 +745,7 @@ func gcFlushBgCredit(scanWork int64) {
 	unlock(&work.assistQueue.lock)
 }
 
-// scanstack 扫描 goroutine 的堆栈，将堆栈上的所有指针标记为灰色。
+// scanstack 对根对象所在的内存块进行扫描，并将根对象引用的对象标记为灰色，并加入到工作队列中以供进一步扫描
 //
 // 返回扫描操作产生的工作量，但不会更新 gcController.stackScanWork 或刷新任何信用。
 // 任何由该函数产生的后台信用应由调用者刷新。scanstack 本身无法安全地刷新信用，
@@ -905,8 +914,7 @@ func scanstack(gp *g, gcw *gcWork) int64 {
 			//如果 conservative 为 true，则调用 scanConservative。
 			scanConservative(b, r.ptrdata(), gcdata, gcw, &state) // 它负责保守地扫描给定的内存区间，并将区间内的潜在指针标记为灰色
 		} else {
-			//如果 conservative 为 false，则调用 scanblock。
-			scanblock(b, r.ptrdata(), gcdata, gcw, &state)
+			scanblock(b, r.ptrdata(), gcdata, gcw, &state) // 对根对象所在的内存块进行扫描，并将根对象引用的对象标记为灰色
 		}
 
 		// 如果使用了额外的空间来解压 GC 程序，则调用 dematerializeGCProg 清理这些临时数据
@@ -1039,7 +1047,7 @@ const (
 	gcDrainFractional
 )
 
-// gcDrain 函数是在并发标记阶段执行的, 主要目的是执行扫描工作，即黑化灰色对象。
+// 函数是在并发标记阶段执行的, 主要目的是执行扫描工作，即黑化灰色对象。
 // 直到无法获得更多的工作。它可能在 GC 完成之前就返回；
 // 调用者需要平衡来自其他处理器（P）的工作。
 //
@@ -1088,9 +1096,15 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 		}
 	}
 
-	// 如果仍有未完成的根对象标记任务。
-	if work.markrootNext < work.markrootJobs {
-		// 如果可抢占或者有人想要执行 stw（停止世界）操作，则停止。
+	// 检查 work.markrootNext 是否小于 work.markrootJobs。
+	// markrootNext 表示下一个要执行的根对象标记任务的索引。
+	// markrootJobs 表示总共需要执行的根对象标记任务的数量。
+	if work.markrootNext < work.markrootJobs { // 检查是否还有未完成的根对象标记任务:
+		// 循环执行标记任务:
+		// 进入循环，直到满足停止条件：
+		// gp.preempt 为真，表示 goroutine 可能会被抢占。
+		// preemptible 为真，表示允许抢占。
+		// sched.gcwaiting.Load() 返回真，表示有其他 goroutine 正在等待 GC 完成。
 		for !(gp.preempt && (preemptible || sched.gcwaiting.Load())) {
 			// 原子增加 work.markrootNext 并获取下一个任务的索引。
 			job := atomic.Xadd(&work.markrootNext, +1) - 1
@@ -1099,7 +1113,7 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 				break
 			}
 
-			markroot(gcw, job, flushBgCredit) // 扫描第 job 个根对象, 将根对象标记会灰色。
+			markroot(gcw, job, flushBgCredit) // 扫描第 job 个根对象, 将根对象引用的对象标记为灰色
 
 			// 如果设置了检查函数并且检查函数返回 true，则提前结束循环。
 			if check != nil && check() {
@@ -1108,7 +1122,10 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 		}
 	}
 
-	// 循环处理堆中的对象，直到无法获取更多工作为止。
+	// 循环处理堆中的对象，直到没有可达的对象为止
+	// gp.preempt 表示是否需要抢占
+	// preemptible 表示是否可以被抢占
+	// sched.gcwaiting.Load() 表示是否有其他协程在等待垃圾回收完成
 	for !(gp.preempt && (preemptible || sched.gcwaiting.Load())) {
 		// 如果 work.full == 0，则调用 gcw.balance() 来平衡工作负载
 		if work.full == 0 {
@@ -1128,7 +1145,9 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 			break
 		}
 
-		scanobject(b, gcw) // 扫描对象, 即黑化灰色对象
+		// gcw工作队列中的对象随着扫描过程的变化而变化。
+		// 通过循环和扫描过程，最终标记所有可达对象。
+		scanobject(b, gcw) // 扫描对象, 即黑化灰色对象, 并将引用的对象标记为灰色, 加入到 gcw 的工作队列中
 
 		// 如果本地积累的扫描工作信用足够多，则将其冲刷到全局账户，
 		// 以便协程协助可以使用它。
@@ -1209,14 +1228,14 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 			}
 		}
 
-		// 如果没有灰色的标记对象, 会触发扫描根对象, 将根对象标记会灰色。
+		// 如果没有灰色的标记对象, 会触发扫描根对象, 将根对象引用的对象标记为灰色
 		if b == 0 {
 			// 尝试执行一个根集任务。
 			if work.markrootNext < work.markrootJobs {
 				// 原子增加并获取下一个根集任务索引。
 				job := atomic.Xadd(&work.markrootNext, +1) - 1
 				if job < work.markrootJobs {
-					workFlushed += markroot(gcw, job, false) // 扫描第 i 个根对象, 将根对象标记会灰色。
+					workFlushed += markroot(gcw, job, false) // 扫描第 i 个根对象, 将根对象引用的对象标记为灰色
 					continue
 				}
 			}
@@ -1240,41 +1259,66 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 	return workFlushed + gcw.heapScanWork
 }
 
-// scanblock scans b as scanobject would, but using an explicit
-// pointer bitmap instead of the heap bitmap.
+// scanblock 对根对象所在的内存块进行扫描，并将根对象引用的对象标记为灰色，并加入到工作队列中以供进一步扫描
 //
-// This is used to scan non-heap roots, so it does not update
-// gcw.bytesMarked or gcw.heapScanWork.
+// 函数用于扫描非堆根对象，如全局变量、栈上的局部变量等。
 //
-// If stk != nil, possible stack pointers are also reported to stk.putPtr.
+//	这些根对象通常是程序的起点，它们可能引用其他对象。
+//
+// 使用指针位图:
+//
+//	为了确定哪些字节包含有效的指针，scanblock 函数使用了一个显式的指针位图 ptrmask。
+//	指针位图中的每个位对应一个字节，如果位为 1，则表示该字节包含一个有效指针。
+//
+// 标记引用对象:
+//
+//	当 scanblock 发现一个有效指针时，它会检查该指针所引用的对象是否可达。
+//	如果对象可达，那么它会被标记为灰色，并加入到工作队列中以供进一步扫描
 //
 //go:nowritebarrier
 func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork, stk *stackScanState) {
-	// Use local copies of original parameters, so that a stack trace
-	// due to one of the throws below shows the original block
-	// base and extent.
-	b := b0
-	n := n0
+	// 初始化局部变量:
+	// 使用局部副本存储原始参数 b0 和 n0，以便在异常抛出导致堆栈跟踪时显示原始块的基址和范围。
+	b := b0 // b 是要扫描的内存块的起始地址。
+	n := n0 // n 是要扫描的内存块的大小。
 
+	// 扫描内存块:
+	// 循环遍历内存块，每次处理一个指针大小的字节。
+	// i 是当前处理的字节偏移。
 	for i := uintptr(0); i < n; {
-		// Find bits for the next word.
+		// 查找下一个指针位:
+		// 使用 addb 函数计算指针位图中的相应位。
+		// bits 是当前处理的 8 字节（即一个指针大小的字节）的位图
 		bits := uint32(*addb(ptrmask, i/(goarch.PtrSize*8)))
 		if bits == 0 {
 			i += goarch.PtrSize * 8
 			continue
 		}
+
+		// 处理每个字节:
+		// 循环遍历每个字节，并检查 bits 中相应的位。
+		// 如果 bits 中的位为 1，则表示该字节包含有效指针。
 		for j := 0; j < 8 && i < n; j++ {
 			if bits&1 != 0 {
-				// Same work as in scanobject; see comments there.
+				// 处理有效指针: 解析有效指针 p。
 				p := *(*uintptr)(unsafe.Pointer(b + i))
+				//如果 p 不为 0，则进一步处理该指针。
 				if p != 0 {
-					if obj, span, objIndex := findObject(p, b, i); obj != 0 {
+					// 查找对象:
+					if obj, span, objIndex := findObject(p, b, i); obj != 0 { // 返回包含地址 p 的堆对象的基本地址
+						// 这表示对象是可达的，需要进一步扫描
 						greyobject(obj, b, i, span, gcw, objIndex) // 将对象标记为灰色，并将其加入 gcw 的工作队列中。
 					} else if stk != nil && p >= stk.stack.lo && p < stk.stack.hi {
+						// 处理栈指针:
+						// 如果 stk 不为 nil，并且指针位于栈范围内，则报告给 stk.putPtr。
+						// 这有助于垃圾回收器识别栈上的对象。
 						stk.putPtr(p, false)
 					}
 				}
 			}
+
+			// 更新循环索引:
+			// 更新 i 以指向下一个要处理的字节。
 			bits >>= 1
 			i += goarch.PtrSize
 		}
@@ -1335,6 +1379,7 @@ func scanobject(b uintptr, gcw *gcWork) {
 	hbits := heapBitsForAddr(b, n)
 
 	// 循环遍历对象中的指针。调用 greyobject 将其标记为灰色
+	// 因为一个对象可以被多个对象引用, 所以这里需要遍历
 	var scanSize uintptr
 	for {
 		var addr uintptr
@@ -1364,11 +1409,11 @@ func scanobject(b uintptr, gcw *gcWork) {
 	}
 
 	// 标记为黑色
-	gcw.bytesMarked += uint64(n)
+	gcw.bytesMarked += uint64(n) // 标记为黑色
 	gcw.heapScanWork += int64(scanSize)
 }
 
-// scanConservative 它负责保守地扫描给定的内存区间，并将区间内的潜在指针标记为灰色
+// 它负责保守地扫描给定的内存区间，并将区间内的潜在指针标记为灰色
 //
 // 如果 ptrmask != nil，则只有在 ptrmask 中被标记的字才被视为潜在的指针。
 //
@@ -1512,7 +1557,7 @@ func greyobject(obj, base, off uintptr, span *mspan, gcw *gcWork, objIndex uintp
 		if mbits.isMarked() {
 			return
 		}
-		mbits.setMarked()
+		mbits.setMarked() // 标记为灰色
 
 		// 标记 span。
 		arena, pageIdx, pageMask := pageIndexOf(span.base())
@@ -1608,22 +1653,33 @@ func gcmarknewobject(span *mspan, obj, size uintptr) {
 	}
 
 	gcw := &getg().m.p.ptr().gcw
-	gcw.bytesMarked += uint64(size)
+	gcw.bytesMarked += uint64(size) // 将新分配的对象标记为黑色。obj不能包含任何非零指针。
 }
 
-// gcMarkTinyAllocs greys all active tiny alloc blocks.
+// 函数用于将所有活动的小块(小于 16 字节)分配（tiny allocation）标记为灰色。
 //
-// The world must be stopped.
+// 注意：世界必须被停止。
+//
+// 这个函数遍历所有处理器 P，并将它们的 mcache 中的小块分配标记为灰色。
+// 小块分配是指那些非常小的对象分配，通常小于特定阈值。
 func gcMarkTinyAllocs() {
+	// 断言世界已被停止
 	assertWorldStopped()
 
+	// 遍历所有处理器 P。
 	for _, p := range allp {
-		c := p.mcache
+		c := p.mcache // 获取当前 P 的 mcache
+
+		// 如果 mcache 不存在或 tiny 分配块为空，则跳过。
 		if c == nil || c.tiny == 0 {
 			continue
 		}
+
+		// 查找 tiny 分配块对应的对象、span 和对象索引。
 		_, span, objIndex := findObject(c.tiny, 0, 0)
+		// 获取当前 P 的 gcw 结构体。
 		gcw := &p.gcw
-		greyobject(c.tiny, 0, 0, span, gcw, objIndex)
+
+		greyobject(c.tiny, 0, 0, span, gcw, objIndex) // 将 tiny 分配块标记为灰色。并将其加入 gcw 的工作队列中。
 	}
 }

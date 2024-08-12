@@ -54,39 +54,33 @@ func init() {
 // gcWork may locally hold GC work buffers. This can be done by
 // disabling preemption (systemstack or acquirem).
 type gcWork struct {
-	// wbuf1 and wbuf2 are the primary and secondary work buffers.
+	// wbuf1 和 wbuf2 是主要和次要的工作缓冲区。
 	//
-	// This can be thought of as a stack of both work buffers'
-	// pointers concatenated. When we pop the last pointer, we
-	// shift the stack up by one work buffer by bringing in a new
-	// full buffer and discarding an empty one. When we fill both
-	// buffers, we shift the stack down by one work buffer by
-	// bringing in a new empty buffer and discarding a full one.
-	// This way we have one buffer's worth of hysteresis, which
-	// amortizes the cost of getting or putting a work buffer over
-	// at least one buffer of work and reduces contention on the
-	// global work lists.
+	// 可以将这两个工作缓冲区的指针视为一个堆栈的组合。当我们在堆栈中弹出最后一个指针时，
+	// 我们会将堆栈向上移动一个工作缓冲区，通过引入一个新的满缓冲区并丢弃一个空缓冲区。
+	// 当我们填充了两个缓冲区时，我们会将堆栈向下移动一个工作缓冲区，通过引入一个新的空缓冲区
+	// 并丢弃一个满缓冲区。这样我们就有了一个缓冲区的滞回效果，这使得获取或放置工作缓冲区的成本
+	// 被摊销到了至少一个缓冲区的工作量上，并减少了对全局工作列表的竞争。
 	//
-	// wbuf1 is always the buffer we're currently pushing to and
-	// popping from and wbuf2 is the buffer that will be discarded
-	// next.
+	// wbuf1 总是当前我们正在推送和弹出的缓冲区，而 wbuf2 是下一个将被丢弃的缓冲区。
 	//
-	// Invariant: Both wbuf1 and wbuf2 are nil or neither are.
+	// 不变式：wbuf1 和 wbuf2 要么都为 nil，要么都不为 nil。
 	wbuf1, wbuf2 *workbuf
 
-	// Bytes marked (blackened) on this gcWork. This is aggregated
-	// into work.bytesMarked by dispose.
+	// 是一个无符号 64 位整数，表示在这个 gcWork 上标记（黑化）的字节数。
+	// 这个值会在 dispose 函数中被汇总到 work.bytesMarked 中。
+	// work.bytesMarked 用于跟踪整个垃圾回收过程中标记的总字节数。
 	bytesMarked uint64
 
-	// Heap scan work performed on this gcWork. This is aggregated into
-	// gcController by dispose and may also be flushed by callers.
-	// Other types of scan work are flushed immediately.
+	// heapScanWork 表示在这个 gcWork 上执行的堆扫描工作量。
+	// 这个工作量会被汇总到 gcController 中，并且可能会被调用者冲刷。
+	// 其他类型的扫描工作则会立即冲刷。
 	heapScanWork int64
 
-	// flushedWork indicates that a non-empty work buffer was
-	// flushed to the global work list since the last gcMarkDone
-	// termination check. Specifically, this indicates that this
-	// gcWork may have communicated work to another gcWork.
+	// 是一个有符号 64 位整数，表示在这个 gcWork 上执行的堆扫描工作量。
+	// 这个值会在 dispose 函数中被汇总到 gcController 中。
+	// gcController 用于控制垃圾回收的进度和效率。
+	// 其他类型的扫描工作（非堆扫描工作）会立即被清除。
 	flushedWork bool
 }
 
@@ -106,57 +100,61 @@ func (w *gcWork) init() {
 	w.wbuf2 = wbuf2
 }
 
-// put enqueues a pointer for the garbage collector to trace.
-// obj must point to the beginning of a heap object or an oblet.
+// put 方法将一个指针加入垃圾回收器的工作队列中以供追踪。
+// obj 必须指向堆对象或 oblet 的起始位置。
 //
 //go:nowritebarrierrec
 func (w *gcWork) put(obj uintptr) {
 	flushed := false
 	wbuf := w.wbuf1
-	// Record that this may acquire the wbufSpans or heap lock to
-	// allocate a workbuf.
+	// 记录这个方法可能会获取 wbufSpans 或 heap 锁来分配一个工作缓冲区。
 	lockWithRankMayAcquire(&work.wbufSpans.lock, lockRankWbufSpans)
 	lockWithRankMayAcquire(&mheap_.lock, lockRankMheap)
-	if wbuf == nil {
+
+	if wbuf == nil { // 如果 wbuf1 为空，则初始化工作缓冲区。
 		w.init()
 		wbuf = w.wbuf1
-		// wbuf is empty at this point.
-	} else if wbuf.nobj == len(wbuf.obj) {
+	} else if wbuf.nobj == len(wbuf.obj) { // 如果 wbuf1 已经满了。
+		// 交换 wbuf1 和 wbuf2。
 		w.wbuf1, w.wbuf2 = w.wbuf2, w.wbuf1
 		wbuf = w.wbuf1
+
+		// 如果交换后 wbuf1 仍然满了。
 		if wbuf.nobj == len(wbuf.obj) {
-			putfull(wbuf)
-			w.flushedWork = true
-			wbuf = getempty()
-			w.wbuf1 = wbuf
-			flushed = true
+			putfull(wbuf)        // 将 wbuf 放回全局队列。
+			w.flushedWork = true // 标记为已冲刷。
+			wbuf = getempty()    // 获取一个新的空工作缓冲区。
+			w.wbuf1 = wbuf       // 赋值
+			flushed = true       // 标记为已冲刷。
 		}
 	}
 
-	wbuf.obj[wbuf.nobj] = obj
-	wbuf.nobj++
+	wbuf.obj[wbuf.nobj] = obj // 将对象放入工作缓冲区。
+	wbuf.nobj++               // 增加工作缓冲区中的对象数量。
 
-	// If we put a buffer on full, let the GC controller know so
-	// it can encourage more workers to run. We delay this until
-	// the end of put so that w is in a consistent state, since
-	// enlistWorker may itself manipulate w.
+	// 如果我们已经将一个缓冲区的工作放回到全局队列，则通知 GC 控制器，
+	// 以便它可以鼓励更多的工作者运行。我们延迟到 put 方法的末尾再做这件事，
+	// 因为 enlistWorker 可能会自身操纵 w，所以我们需要确保 w 处于一致的状态。
 	if flushed && gcphase == _GCmark {
-		gcController.enlistWorker()
+		gcController.enlistWorker() // 唤醒一个工作者。
 	}
 }
 
-// putFast does a put and reports whether it can be done quickly
-// otherwise it returns false and the caller needs to call put.
+// putFast 方法尝试快速地将一个对象放入工作缓冲区，并报告是否成功。
+// 如果不能快速放入，则返回 false，此时调用者需要调用 put 方法。
 //
 //go:nowritebarrierrec
 func (w *gcWork) putFast(obj uintptr) bool {
+	// 获取当前的工作缓冲区 wbuf1。
 	wbuf := w.wbuf1
+
+	// 如果 wbuf1 为空，或者已经达到最大容量，则不能快速放入。
 	if wbuf == nil || wbuf.nobj == len(wbuf.obj) {
 		return false
 	}
 
-	wbuf.obj[wbuf.nobj] = obj
-	wbuf.nobj++
+	wbuf.obj[wbuf.nobj] = obj // 将对象放入工作缓冲区。
+	wbuf.nobj++               // 增加工作缓冲区中的对象数量。
 	return true
 }
 
@@ -218,7 +216,7 @@ func (w *gcWork) tryGet() uintptr {
 		// 如果交换后的 wbuf 依然为空，则尝试从全局队列中获取一个缓冲区
 		if wbuf.nobj == 0 {
 			owbuf := wbuf
-			wbuf = trygetfull() // 尝试从全局队列中获取一个缓冲区
+			wbuf = trygetfull() // 尝试从全局队列 work.full 中获取一个缓冲区
 			if wbuf == nil {
 				return 0
 			}
@@ -291,34 +289,39 @@ func (w *gcWork) dispose() {
 	}
 }
 
-// balance moves some work that's cached in this gcWork back on the
-// global queue.
+// balance 方法将一些缓存在当前 gcWork 中的工作移回到全局队列。
 //
 //go:nowritebarrierrec
 func (w *gcWork) balance() {
+	// 如果 wbuf1 为空，则表明没有缓存的工作，直接返回。
 	if w.wbuf1 == nil {
 		return
 	}
+
+	// 如果 wbuf2 不为空且包含对象，则将 wbuf2 中的工作放回全局队列。
 	if wbuf := w.wbuf2; wbuf.nobj != 0 {
-		putfull(wbuf)
-		w.flushedWork = true
-		w.wbuf2 = getempty()
+		putfull(wbuf)        // 将 wbuf2 放回全局队列。
+		w.flushedWork = true // 标记为已冲刷。
+		w.wbuf2 = getempty() // 重新获取一个空的工作缓冲区。
 	} else if wbuf := w.wbuf1; wbuf.nobj > 4 {
-		w.wbuf1 = handoff(wbuf)
-		w.flushedWork = true // handoff did putfull
+		// 如果 wbuf1 包含超过 4 个对象，则将 wbuf1 中的工作放回全局队列。
+		w.wbuf1 = handoff(wbuf) // 将 wbuf1 中的工作放回全局队列，并更新 wbuf1。
+		w.flushedWork = true    // 标记为已冲刷。
 	} else {
 		return
 	}
-	// We flushed a buffer to the full list, so wake a worker.
+
+	// 我们已经将一个缓冲区的工作放回到了全局队列，因此唤醒一个工作者。
 	if gcphase == _GCmark {
-		gcController.enlistWorker()
+		gcController.enlistWorker() // 唤醒一个工作者。
 	}
 }
 
-// empty reports whether w has no mark work available.
+// 方法报告当前 gcWork 是否没有可标记的工作。
 //
 //go:nowritebarrierrec
 func (w *gcWork) empty() bool {
+	// 检查 wbuf1 是否为空，或者 wbuf1 和 wbuf2 都没有待标记的对象。
 	return w.wbuf1 == nil || (w.wbuf1.nobj == 0 && w.wbuf2.nobj == 0)
 }
 
@@ -326,9 +329,14 @@ func (w *gcWork) empty() bool {
 // The gcWork interface caches a work buffer until full (or empty) to
 // avoid contending on the global work buffer lists.
 
+// 结构体表示工作缓冲区的头部信息。
+// 它包含了工作缓冲区的关键元数据。
+//
+// node 是一个轻量级的节点，用于将工作缓冲区链接到双向链表中。
+// nobj 表示工作缓冲区中当前存储的对象数量。
 type workbufhdr struct {
-	node lfnode // must be first
-	nobj int
+	node lfnode // 是一个轻量级的节点，用于将工作缓冲区链接到双向链表中。
+	nobj int    // 工作缓冲区中当前存储的对象数量
 }
 
 type workbuf struct {
@@ -430,17 +438,19 @@ func putfull(b *workbuf) {
 	work.full.push(&b.node)
 }
 
-// trygetfull tries to get a full or partially empty workbuffer.
-// If one is not immediately available return nil.
+// trygetfull 尝试从全局队列 work.full 中获取一个缓冲区
+// 如果没有立即可用的工作缓冲区，则返回 nil。
 //
 //go:nowritebarrier
 func trygetfull() *workbuf {
+	// 从 full 队列中尝试弹出一个工作缓冲区。
 	b := (*workbuf)(work.full.pop())
 	if b != nil {
-		b.checknonempty()
-		return b
+		b.checknonempty() // 确保工作缓冲区不是空的。
+		return b          // 返回找到的工作缓冲区
 	}
-	return b
+
+	return b // 如果没有找到，则返回 nil。
 }
 
 //go:nowritebarrier
