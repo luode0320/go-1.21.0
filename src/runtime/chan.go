@@ -350,7 +350,7 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		}
 	}
 
-	// 如果 sg 中的 elem 不为 nil，这表示 sg 已经准备好接收数据
+	// 如果 sg 中的 elem 不为 nil，这表示 sg 已经准备好发送数据
 	if sg.elem != nil {
 		// 直接将 sg 中的值发送到通道 c 中
 		sendDirect(c.elemtype, sg, ep)
@@ -358,7 +358,7 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		sg.elem = nil
 	}
 
-	// 获取此 goroutine
+	// 获取接收者 goroutine
 	gp := sg.g
 	// 使用 unlockf 解锁通道 c
 	unlockf()

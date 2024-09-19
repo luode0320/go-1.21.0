@@ -716,7 +716,7 @@ func gcStart(trigger gcTrigger) {
 		schedEnableUser(false) // 函数用于禁用用户 goroutine 的调度
 	}
 
-	// 进入并发标记阶段并启用写屏障。
+	// 进入初始标记阶段并启用写屏障。
 
 	// 如果当前阶段是标记阶段 _GCmark 或标记终止阶段 _GCmarktermination ，则需要启用写屏障
 	setGCPhase(_GCmark) // 设置 GC 并发标记阶段, 函数用于设置当前的垃圾回收阶段，并根据垃圾回收阶段调整写屏障的启用状态
